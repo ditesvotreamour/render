@@ -202,7 +202,7 @@ export interface BackgroundConfig {
   multiImageUrls?: string[];
   multiImageSlides?: SlideItem[];
   multiImageInterval?: number; // seconds between images (fallback when slides not explicitly timed)
-  multiImageTransition?: 'fade' | 'cut';
+  multiImageTransition?: 'fade' | 'fade_black' | 'zoom' | 'slide' | 'cut';
   multiImageKenBurns?: boolean;
   solidColor: string;
   dimOpacity: number; // 0 to 1

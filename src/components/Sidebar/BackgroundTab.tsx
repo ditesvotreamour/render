@@ -240,27 +240,35 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
                   className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-400"
                 />
               </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => updateBg({ multiImageTransition: 'fade' })}
-                  className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold border transition-colors ${
-                    (!bgConfig.multiImageTransition || bgConfig.multiImageTransition === 'fade')
-                      ? 'bg-indigo-500/20 border-indigo-500/50 text-indigo-300'
-                      : 'bg-white/5 border-white/10 text-slate-400'
-                  }`}
-                >
-                  Smooth Fade
-                </button>
-                <button
-                  onClick={() => updateBg({ multiImageTransition: 'cut' })}
-                  className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold border transition-colors ${
-                    bgConfig.multiImageTransition === 'cut'
-                      ? 'bg-indigo-500/20 border-indigo-500/50 text-indigo-300'
-                      : 'bg-white/5 border-white/10 text-slate-400'
-                  }`}
-                >
-                  Hard Cut
-                </button>
+              <div>
+                <label className="block text-[11px] font-medium text-slate-400 mb-1.5">
+                  Gaya Transisi Gambar
+                </label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[
+                    { id: 'fade', label: '🌫️ Smooth Fade' },
+                    { id: 'fade_black', label: '🎬 Dip Black' },
+                    { id: 'zoom', label: '🔍 Zoom Push' },
+                    { id: 'slide', label: '↔️ Slide' },
+                    { id: 'cut', label: '✂️ Hard Cut' },
+                  ].map((item) => {
+                    const isSelected = (!bgConfig.multiImageTransition && item.id === 'fade') || bgConfig.multiImageTransition === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => updateBg({ multiImageTransition: item.id as any })}
+                        className={`py-1.5 px-2 rounded-lg text-[10px] font-bold border text-center transition-all ${
+                          isSelected
+                            ? 'bg-indigo-500/25 border-indigo-400 text-indigo-200 shadow-sm ring-1 ring-indigo-400/30'
+                            : 'bg-white/5 border-white/10 text-slate-400 hover:text-slate-200 hover:bg-white/10'
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
               <button
                 onClick={() => updateBg({ multiImageKenBurns: bgConfig.multiImageKenBurns === false ? true : false })}

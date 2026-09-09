@@ -312,106 +312,240 @@ export class CanvasRenderer {
       ctx.fillStyle = bg.solidColor || '#07080E';
       ctx.fillRect(0, 0, width, height);
 
-      const drawImageCover = (url: string, alpha: number, cycleIdx: number, localTime: number, duration: number) => {
+      // --- CONTINUOUS CINEMATIC KEN BURNS & TRANSITIONS ENGINE ---
+      const totalTime = Math.max(0, currentTime);
+      const isKenBurns = bg.multiImageKenBurns !== false;
+      const transType = bg.multiImageTransition || 'fade';
+
+      // Reusable drawer for an image with continuous global-time camera trajectory
+      const renderSlideImage = (
+        url: string,
+        opacity: number,
+        slideIdx: number,
+        startSec: number,
+        slideDur: number,
+        extraTransform?: { scaleMul?: number; offsetX?: number; offsetY?: number }
+      ) => {
+        if (opacity <= 0.001) return;
         const img = this.preloadImage(url);
-        if (img && img.complete && img.naturalWidth > 0) {
-          ctx.save();
-          ctx.globalAlpha = alpha;
-          
-          if (bg.multiImageKenBurns !== false) {
-             const isEven = cycleIdx % 2 === 0;
-             const zoomIn = (cycleIdx % 4 === 0) || (cycleIdx % 4 === 3);
-             const baseScale = 1.04;
-             const effectiveDur = Math.max(0.5, duration);
-             const p = Math.max(0, Math.min(1, localTime / effectiveDur));
-             // Smoothstep curve for silky continuous camera glide
-             const smoothP = p * p * (3 - 2 * p);
-             const scale = zoomIn 
-                ? baseScale + smoothP * 0.08 
-                : (baseScale + 0.08) - smoothP * 0.08;
-             
-             // Smooth pan trajectory without sudden jumps
-             const maxPan = 22;
-             const panX = (isEven ? -1 : 1) * maxPan * (smoothP - 0.5);
-             const panY = (isEven ? 1 : -1) * (maxPan * 0.55) * (smoothP - 0.5);
-             
-             ctx.translate(centerX + panX, centerY + panY);
-             ctx.scale(scale, scale);
-             ctx.translate(-centerX, -centerY);
+        if (!img || !img.complete || img.naturalWidth <= 0) return;
+
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
+
+        if (isKenBurns) {
+          // Strictly monotonic progress across this slide's entire lifetime (including fade in and fade out)
+          // Notice: (totalTime - startSec) / duration does NOT jump or rewind when slide boundary changes!
+          const rawP = (totalTime - startSec) / Math.max(0.5, slideDur);
+          const clampedP = Math.max(0, Math.min(1, rawP));
+          // Silky S-curve easing
+          const smoothP = clampedP * clampedP * (3 - 2 * clampedP);
+          const effectiveP = rawP < 0 ? rawP * 0.9 : rawP > 1 ? 1 + (rawP - 1) * 0.9 : smoothP;
+
+          // 6 distinct cinematic director choreographies
+          const pattern = Math.abs(slideIdx) % 6;
+          // Noticeable, dramatic zoom: 1.08x to 1.28x (20% dynamic zoom!)
+          let scale = 1.08;
+          // Proportional pan: responsive to resolution (e.g. 80-90px on 1080p, 160px on 4K)
+          const panMaxX = width * 0.045;
+          const panMaxY = height * 0.035;
+          let panX = 0;
+          let panY = 0;
+
+          switch (pattern) {
+            case 0:
+              // 1. Slow Cinematic Zoom In + Drift Up-Right
+              scale = 1.08 + effectiveP * 0.18;
+              panX = (effectiveP - 0.5) * panMaxX;
+              panY = (0.5 - effectiveP) * panMaxY;
+              break;
+
+            case 1:
+              // 2. Slow Dramatic Zoom Out + Drift Down-Left
+              scale = 1.26 - effectiveP * 0.18;
+              panX = (0.5 - effectiveP) * panMaxX;
+              panY = (effectiveP - 0.5) * panMaxY;
+              break;
+
+            case 2:
+              // 3. Wide Panoramic Pan Left to Right (Steady majestic framing)
+              scale = 1.15 + Math.sin(clampedP * Math.PI) * 0.05;
+              panX = (effectiveP - 0.5) * (panMaxX * 1.5);
+              panY = Math.sin(clampedP * Math.PI) * (panMaxY * 0.4);
+              break;
+
+            case 3:
+              // 4. Wide Pan Right to Left + Slow Dramatic Zoom In
+              scale = 1.10 + effectiveP * 0.16;
+              panX = (0.5 - effectiveP) * (panMaxX * 1.5);
+              panY = (effectiveP - 0.5) * (panMaxY * 0.5);
+              break;
+
+            case 4:
+              // 5. Deep Center Focus Zoom In (Hero / Portrait Shot)
+              scale = 1.08 + effectiveP * 0.20;
+              panX = Math.sin(clampedP * Math.PI) * (panMaxX * 0.25);
+              panY = -effectiveP * (panMaxY * 0.85);
+              break;
+
+            case 5:
+            default:
+              // 6. Pull Back Reveal (Center-Top Close-Up to Wide Atmosphere)
+              scale = 1.28 - effectiveP * 0.19;
+              panX = Math.cos(clampedP * Math.PI) * (panMaxX * 0.35);
+              panY = (effectiveP - 0.5) * (panMaxY * 0.8);
+              break;
           }
 
-          const sourceToDraw = bg.blur > 0 ? this.getBlurredImage(img, bg.blur) : img;
-
-          const imgRatio = img.naturalWidth / img.naturalHeight;
-          const canvasRatio = width / height;
-          let dw = width, dh = height, dx = 0, dy = 0;
-          if (imgRatio > canvasRatio) {
-            dw = height * imgRatio;
-            dx = (width - dw) / 2;
-          } else {
-            dh = width / imgRatio;
-            dy = (height - dh) / 2;
+          // Audio-reactive bass breathing punch
+          if (isPlaying && bass > 0.08) {
+            const bassPulse = Math.pow(bass, 1.3) * (0.025 + (bg.bassZoom || 0) * 0.08);
+            scale += bassPulse;
+            if (bg.bassShake && bg.bassShake > 0) {
+              const shakeAmt = bg.bassShake * bass * 14;
+              panX += Math.sin(totalTime * 38) * shakeAmt;
+              panY += Math.cos(totalTime * 46) * shakeAmt;
+            }
           }
-          ctx.drawImage(sourceToDraw, dx, dy, dw, dh);
-          ctx.restore();
+
+          // Apply transition-specific modifiers (e.g. for zoom push / slide)
+          if (extraTransform) {
+            if (extraTransform.scaleMul) scale *= extraTransform.scaleMul;
+            if (extraTransform.offsetX) panX += extraTransform.offsetX;
+            if (extraTransform.offsetY) panY += extraTransform.offsetY;
+          }
+
+          ctx.translate(centerX + panX, centerY + panY);
+          ctx.scale(scale, scale);
+          ctx.translate(-centerX, -centerY);
+        } else if (extraTransform) {
+          if (extraTransform.offsetX || extraTransform.offsetY) {
+            ctx.translate(extraTransform.offsetX || 0, extraTransform.offsetY || 0);
+          }
+          if (extraTransform.scaleMul && extraTransform.scaleMul !== 1) {
+            ctx.translate(centerX, centerY);
+            ctx.scale(extraTransform.scaleMul, extraTransform.scaleMul);
+            ctx.translate(-centerX, -centerY);
+          }
         }
+
+        const sourceToDraw = bg.blur > 0 ? this.getBlurredImage(img, bg.blur) : img;
+        const imgRatio = img.naturalWidth / img.naturalHeight;
+        const canvasRatio = width / height;
+        let dw = width, dh = height, dx = 0, dy = 0;
+        if (imgRatio > canvasRatio) {
+          dw = height * imgRatio;
+          dx = (width - dw) / 2;
+        } else {
+          dh = width / imgRatio;
+          dy = (height - dh) / 2;
+        }
+        ctx.drawImage(sourceToDraw, dx, dy, dw, dh);
+        ctx.restore();
       };
 
+      // --- Determine Active & Next Slide based on Mode ---
       if (bg.multiImageSlides && bg.multiImageSlides.length > 0) {
         const slides = bg.multiImageSlides;
-        const totalTime = Math.max(0, currentTime);
-        
-        // Find slide active at currentTime
-        let currentIndex = slides.findIndex(s => totalTime >= s.startSec && totalTime < s.endSec);
-        if (currentIndex === -1) {
-          if (totalTime < slides[0].startSec) {
-            currentIndex = 0;
-          } else {
-            currentIndex = slides.length - 1;
-          }
+        let currIdx = slides.findIndex((s) => totalTime >= s.startSec && totalTime < s.endSec);
+        if (currIdx === -1) {
+          currIdx = totalTime < slides[0].startSec ? 0 : slides.length - 1;
         }
 
-        const currentSlide = slides[currentIndex];
+        const currentSlide = slides[currIdx];
         const slideDur = Math.max(0.5, currentSlide.endSec - currentSlide.startSec);
         const timeInSlide = Math.max(0, totalTime - currentSlide.startSec);
+        const nextIdx = (currIdx + 1) % slides.length;
+        const nextSlide = slides[nextIdx];
+        const nextDur = Math.max(0.5, nextSlide.endSec - nextSlide.startSec);
 
-        // Transition time
-        const transitionTime = Math.min(1.2, slideDur * 0.35);
-        let nextIndex = (currentIndex + 1) % slides.length;
-        let alphaNext = 0;
-        
-        if (bg.multiImageTransition !== 'cut' && currentIndex < slides.length - 1 && timeInSlide > slideDur - transitionTime) {
-          alphaNext = Math.min(1, Math.max(0, (timeInSlide - (slideDur - transitionTime)) / transitionTime));
-        }
+        // Smooth cinematic transition duration (1.0s to 1.8s for standard slides, shorter for brief clips)
+        const transitionTime = Math.min(1.8, Math.max(0.6, slideDur * 0.32));
+        const canTransition = transType !== 'cut' && (currIdx < slides.length - 1 || slides.length > 1);
+        const inTransition = canTransition && timeInSlide > (slideDur - transitionTime);
 
-        drawImageCover(currentSlide.url, 1.0, currentIndex, timeInSlide, slideDur);
-        if (alphaNext > 0 && slides[nextIndex]) {
-          const nextDur = Math.max(0.5, slides[nextIndex].endSec - slides[nextIndex].startSec);
-          const incomingLocalTime = Math.max(0, timeInSlide - (slideDur - transitionTime));
-          drawImageCover(slides[nextIndex].url, alphaNext, currentIndex + 1, incomingLocalTime, nextDur);
+        if (inTransition) {
+          const transP = (timeInSlide - (slideDur - transitionTime)) / transitionTime;
+          const smoothTransP = Math.max(0, Math.min(1, transP));
+          const easeT = 0.5 - 0.5 * Math.cos(smoothTransP * Math.PI); // Silky S-curve cosine
+
+          if (transType === 'fade_black') {
+            // Cinematic Dip to Black
+            if (smoothTransP < 0.5) {
+              const alphaOut = 1 - smoothTransP * 2;
+              renderSlideImage(currentSlide.url, alphaOut, currIdx, currentSlide.startSec, slideDur);
+            } else {
+              const alphaIn = (smoothTransP - 0.5) * 2;
+              renderSlideImage(nextSlide.url, alphaIn, nextIdx, nextSlide.startSec, nextDur);
+            }
+          } else if (transType === 'zoom') {
+            // Zoom-Through Push Dissolve
+            const outScale = 1 + easeT * 0.12;
+            const inScale = 1.14 - easeT * 0.14;
+            renderSlideImage(currentSlide.url, 1 - easeT, currIdx, currentSlide.startSec, slideDur, { scaleMul: outScale });
+            renderSlideImage(nextSlide.url, easeT, nextIdx, nextSlide.startSec, nextDur, { scaleMul: inScale });
+          } else if (transType === 'slide') {
+            // Slide / Push Horizontal
+            const outX = -easeT * width;
+            const inX = (1 - easeT) * width;
+            renderSlideImage(currentSlide.url, 1, currIdx, currentSlide.startSec, slideDur, { offsetX: outX });
+            renderSlideImage(nextSlide.url, 1, nextIdx, nextSlide.startSec, nextDur, { offsetX: inX });
+          } else {
+            // Default: Buttery Smooth Crossfade / Dissolve
+            renderSlideImage(currentSlide.url, 1, currIdx, currentSlide.startSec, slideDur);
+            renderSlideImage(nextSlide.url, easeT, nextIdx, nextSlide.startSec, nextDur);
+          }
+        } else {
+          // Normal playback without transition
+          renderSlideImage(currentSlide.url, 1.0, currIdx, currentSlide.startSec, slideDur);
         }
       } else {
-        const interval = bg.multiImageInterval || 5;
+        // Uniform Interval Mode
+        const interval = Math.max(1, bg.multiImageInterval || 5);
         const urls = bg.multiImageUrls || [];
         const count = urls.length;
         if (count > 0) {
-          const totalTime = Math.max(0, currentTime);
           const cycleIndex = Math.floor(totalTime / interval);
-          const currentIndex = cycleIndex % count;
-          const nextIndex = (cycleIndex + 1) % count;
-          
-          const timeInCurrent = totalTime % interval;
-          const transitionTime = Math.min(1.2, interval * 0.35); // smooth crossfade
-          
-          let alphaNext = 0;
-          if (bg.multiImageTransition !== 'cut' && timeInCurrent > interval - transitionTime) {
-            alphaNext = (timeInCurrent - (interval - transitionTime)) / transitionTime;
-          }
+          const currIdx = cycleIndex % count;
+          const nextIdx = (cycleIndex + 1) % count;
+          const currentStartSec = cycleIndex * interval;
+          const nextStartSec = (cycleIndex + 1) * interval;
+          const timeInCurrent = totalTime - currentStartSec;
 
-          drawImageCover(urls[currentIndex], 1.0, cycleIndex, timeInCurrent, interval);
-          if (alphaNext > 0) {
-            const incomingLocalTime = timeInCurrent - (interval - transitionTime);
-            drawImageCover(urls[nextIndex], alphaNext, cycleIndex + 1, incomingLocalTime, interval);
+          const transitionTime = Math.min(1.8, Math.max(0.6, interval * 0.28));
+          const canTransition = transType !== 'cut' && count > 1;
+          const inTransition = canTransition && timeInCurrent > (interval - transitionTime);
+
+          if (inTransition) {
+            const transP = (timeInCurrent - (interval - transitionTime)) / transitionTime;
+            const smoothTransP = Math.max(0, Math.min(1, transP));
+            const easeT = 0.5 - 0.5 * Math.cos(smoothTransP * Math.PI);
+
+            if (transType === 'fade_black') {
+              if (smoothTransP < 0.5) {
+                const alphaOut = 1 - smoothTransP * 2;
+                renderSlideImage(urls[currIdx], alphaOut, cycleIndex, currentStartSec, interval);
+              } else {
+                const alphaIn = (smoothTransP - 0.5) * 2;
+                renderSlideImage(urls[nextIdx], alphaIn, cycleIndex + 1, nextStartSec, interval);
+              }
+            } else if (transType === 'zoom') {
+              const outScale = 1 + easeT * 0.12;
+              const inScale = 1.14 - easeT * 0.14;
+              renderSlideImage(urls[currIdx], 1 - easeT, cycleIndex, currentStartSec, interval, { scaleMul: outScale });
+              renderSlideImage(urls[nextIdx], easeT, cycleIndex + 1, nextStartSec, interval, { scaleMul: inScale });
+            } else if (transType === 'slide') {
+              const outX = -easeT * width;
+              const inX = (1 - easeT) * width;
+              renderSlideImage(urls[currIdx], 1, cycleIndex, currentStartSec, interval, { offsetX: outX });
+              renderSlideImage(urls[nextIdx], 1, cycleIndex + 1, nextStartSec, interval, { offsetX: inX });
+            } else {
+              // Default: Buttery Smooth Crossfade
+              renderSlideImage(urls[currIdx], 1, cycleIndex, currentStartSec, interval);
+              renderSlideImage(urls[nextIdx], easeT, cycleIndex + 1, nextStartSec, interval);
+            }
+          } else {
+            renderSlideImage(urls[currIdx], 1.0, cycleIndex, currentStartSec, interval);
           }
         }
       }

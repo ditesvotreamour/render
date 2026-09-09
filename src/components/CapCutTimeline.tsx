@@ -1222,16 +1222,48 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
               {/* Right: Transitions, Ken Burns & Reset */}
               <div className="flex items-center gap-1.5 text-[10px]">
                 <button
-                  onClick={() =>
+                  onClick={() => {
+                    const cycle: ('fade' | 'fade_black' | 'zoom' | 'slide' | 'cut')[] = [
+                      'fade',
+                      'fade_black',
+                      'zoom',
+                      'slide',
+                      'cut',
+                    ];
+                    const current = backgroundConfig.multiImageTransition || 'fade';
+                    const nextIdx = (cycle.indexOf(current) + 1) % cycle.length;
+                    const nextTransition = cycle[nextIdx];
                     onBackgroundChange({
                       ...backgroundConfig,
-                      multiImageTransition: backgroundConfig.multiImageTransition === 'cut' ? 'fade' : 'cut',
-                    })
-                  }
+                      multiImageTransition: nextTransition,
+                    });
+                    setStatusMessage(`🎬 Transisi diubah: ${
+                      nextTransition === 'cut'
+                        ? '✂️ Cut Langsung'
+                        : nextTransition === 'fade_black'
+                        ? '🎬 Dip to Black'
+                        : nextTransition === 'zoom'
+                        ? '🔍 Zoom Push'
+                        : nextTransition === 'slide'
+                        ? '↔️ Slide Kiri'
+                        : '🌫️ Fade Halus'
+                    }`);
+                  }}
                   className="px-2 py-0.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 transition-colors"
-                  title="Ganti transisi antara Fade (halus) atau Cut (langsung)"
+                  title="Klik untuk mengganti gaya transisi foto (Fade Halus, Dip Black, Zoom Push, Slide, Cut)"
                 >
-                  Transisi: <span className="text-cyan-300 font-bold">{backgroundConfig.multiImageTransition === 'cut' ? 'Cut' : 'Fade'}</span>
+                  Transisi:{' '}
+                  <span className="text-cyan-300 font-bold">
+                    {backgroundConfig.multiImageTransition === 'cut'
+                      ? '✂️ Cut'
+                      : backgroundConfig.multiImageTransition === 'fade_black'
+                      ? '🎬 Dip Black'
+                      : backgroundConfig.multiImageTransition === 'zoom'
+                      ? '🔍 Zoom Push'
+                      : backgroundConfig.multiImageTransition === 'slide'
+                      ? '↔️ Slide'
+                      : '🌫️ Fade'}
+                  </span>
                 </button>
 
                 <button
