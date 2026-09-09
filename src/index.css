@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Enforce straight, sharp corners across all UI components */
+  *, *::before, *::after {
+    border-radius: 0 !important;
+  }
+
+  body {
+    @apply bg-[#06080C] text-slate-100;
+  }
+}
+
+/* Custom Scrollbar - Sharp Studio Workstation */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #080b12;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e283b;
+  border-radius: 0px !important;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #00f0ff;
+}
+
+/* Sharp Slider Controls (input[type='range']) */
+input[type='range'] {
+  border-radius: 0px !important;
+}
+input[type='range']::-webkit-slider-thumb {
+  border-radius: 0px !important;
+}
+input[type='range']::-webkit-slider-runnable-track {
+  border-radius: 0px !important;
+}
+input[type='range']::-moz-range-thumb {
+  border-radius: 0px !important;
+}
+input[type='range']::-moz-range-track {
+  border-radius: 0px !important;
+}
+
+/* Glowing utilities */
+.glow-pink {
+  box-shadow: 0 0 25px -5px rgba(236, 72, 153, 0.4);
+}
+
+.glow-purple {
+  box-shadow: 0 0 25px -5px rgba(168, 85, 247, 0.4);
+}
+
+.glow-amber {
+  box-shadow: 0 0 25px -5px rgba(245, 158, 11, 0.4);
+}
+
+.text-stroke-sm {
+  -webkit-text-stroke: 2px black;
+  paint-order: stroke fill;
+}
+
+.text-stroke-md {
+  -webkit-text-stroke: 4px black;
+  paint-order: stroke fill;
+}
+
+.text-stroke-lg {
+  -webkit-text-stroke: 6px black;
+  paint-order: stroke fill;
+}
