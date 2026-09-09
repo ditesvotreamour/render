@@ -1,0 +1,135 @@
+name: Specterr Online Cloud Visualizer Render
+run-name: '🎬 ${{ inputs.track_title }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_json:
+        description: 'Visualizer Configuration JSON (inline, optional)'
+        required: false
+        default: ''
+        type: string
+      config_file:
+        description: 'Path to config JSON file in repository (for large configs)'
+        required: false
+        default: ''
+        type: string
+      audio_url:
+        description: 'Audio File URL or Sample Track ID'
+        required: false
+        default: 'sample'
+        type: string
+      resolution:
+        description: 'Video Resolution'
+        required: false
+        default: '1080p'
+        type: choice
+        options:
+          - '1080p'
+          - '4k'
+          - '720p'
+      aspect_ratio:
+        description: 'Video Aspect Ratio (e.g. 9:16 for TikTok/Shorts, 16:9 for YouTube)'
+        required: false
+        default: '16:9'
+        type: choice
+        options:
+          - '9:16'
+          - '16:9'
+          - '1:1'
+          - '4:5'
+      fps:
+        description: 'Frame Rate'
+        required: false
+        default: '60'
+        type: choice
+        options:
+          - '60'
+          - '30'
+      track_title:
+        description: 'Music Track Title'
+        required: false
+        default: 'Visualizer_Render'
+        type: string
+      duration_seconds:
+        description: 'Duration in seconds (0 for full track)'
+        required: false
+        default: '30'
+        type: string
+      start_time:
+        description: 'Start time in seconds (e.g. 45 for chorus/reff)'
+        required: false
+        default: '0'
+        type: string
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    name: 🎬 Render Specterr Video
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: 🎞️ Setup FFmpeg
+        run: |
+          which ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y ffmpeg)
+          ffmpeg -version
+
+      - name: 📦 Install Dependencies & Build Render Harness
+        run: |
+          npm ci || npm install
+          npm install puppeteer
+          npm run build
+
+      - name: 📝 Save Config File
+        env:
+          CONFIG_CONTENT: ${{ inputs.config_json }}
+          CONFIG_FILE_PATH: ${{ inputs.config_file }}
+        run: |
+          mkdir -p dist-render
+          if [ -n "$CONFIG_FILE_PATH" ] && [ -f "$CONFIG_FILE_PATH" ]; then
+            echo "📄 Using config file from repository: $CONFIG_FILE_PATH"
+            cp "$CONFIG_FILE_PATH" dist-render/config.json
+          else
+            echo "📝 Using inline config_json"
+            echo "$CONFIG_CONTENT" > dist-render/config.json
+          fi
+
+      - name: 🚀 Run Headless Pixel-Perfect Cloud Renderer
+        run: |
+          node scripts/cloud-render.cjs \
+            --config-file dist-render/config.json \
+            --title '${{ inputs.track_title }}' \
+            --audio '${{ inputs.audio_url }}' \
+            --aspect-ratio '${{ inputs.aspect_ratio }}' \
+            --resolution '${{ inputs.resolution }}' \
+            --fps '${{ inputs.fps }}' \
+            --duration '${{ inputs.duration_seconds }}' \
+            --start-time '${{ inputs.start_time }}'
+
+      - name: 📤 Upload Rendered MP4 Video
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.track_title }}-${{ github.run_id }}
+          path: dist-render/*.mp4
+          retention-days: 7
+
+      - name: 🚀 Publish Direct Download Release
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: render-${{ github.run_id }}
+          name: ${{ inputs.track_title }} (Run #${{ github.run_id }})
+          files: dist-render/*.mp4
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
