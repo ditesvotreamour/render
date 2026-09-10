@@ -1,5 +1,5 @@
 /**
- * Specterr Cloud Render Pipeline - Headless Canvas & Hardware-Accelerated FFmpeg
+ * BeatFlow Cloud Render Pipeline - Headless Canvas & Hardware-Accelerated FFmpeg
  * Renders 100% pixel-perfect visualizer matching the browser studio canvas.
  */
 const fs = require('fs');
@@ -16,7 +16,7 @@ function getArg(name, defaultValue = '') {
 }
 
 async function main() {
-  console.log('🚀 Starting Specterr Pixel-Perfect Cloud Render Engine...');
+  console.log('🚀 Starting BeatFlow Pixel-Perfect Cloud Render Engine...');
 
   let configJson = getArg('--config-json', '');
   const configFile = getArg('--config-file', '');
@@ -238,17 +238,34 @@ async function main() {
     puppeteer = require('puppeteer-core');
   }
 
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-web-security',
+  const isGpu = process.argv.includes('--gpu') || process.env.RENDER_GPU === '1';
+  const chromeArgs = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-web-security',
+  ];
+
+  if (isGpu) {
+    console.log('⚡ GPU Acceleration enabled for Chrome renderer (Colab / GPU Runner)');
+    chromeArgs.push(
+      '--ignore-gpu-blocklist',
+      '--enable-gpu-rasterization',
+      '--enable-zero-copy',
+      '--use-gl=angle',
+      '--use-angle=gl-egl'
+    );
+  } else {
+    chromeArgs.push(
       '--use-gl=angle',
       '--use-angle=swiftshader',
-      '--enable-unsafe-webgpu',
-    ],
+      '--enable-unsafe-webgpu'
+    );
+  }
+
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: chromeArgs,
   });
 
   const page = await browser.newPage();
@@ -285,6 +302,20 @@ async function main() {
 
   // Start FFmpeg Subprocess for Pipe Ingestion with explicit dimension scaling
   console.log('🎥 Spawning FFmpeg video encoder...');
+  let videoEncoderArgs = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '18'];
+  if (isGpu || process.argv.includes('--nvenc')) {
+    try {
+      const { execSync } = require('child_process');
+      const encoders = execSync('ffmpeg -encoders', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      if (encoders.includes('h264_nvenc')) {
+        console.log('🚀 NVIDIA NVENC Hardware Video Encoder detected & enabled!');
+        videoEncoderArgs = ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '20', '-b:v', '0'];
+      }
+    } catch {
+      // fallback to libx264
+    }
+  }
+
   const ffmpegArgs = [
     '-y',
     '-f', 'image2pipe',
@@ -297,9 +328,7 @@ async function main() {
     '-i', tempAudioPath,
     '-map', '0:v',
     '-map', '1:a',
-    '-c:v', 'libx264',
-    '-preset', 'fast',
-    '-crf', '18',
+    ...videoEncoderArgs,
     '-vf', `scale=${viewW}:${viewH}:force_original_aspect_ratio=decrease,pad=${viewW}:${viewH}:(ow-iw)/2:(oh-ih)/2`,
     '-c:a', 'aac',
     '-b:a', '320k',
