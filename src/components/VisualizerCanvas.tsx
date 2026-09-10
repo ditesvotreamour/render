@@ -8,6 +8,7 @@ import {
   SlidersHorizontal,
   Check,
   ChevronDown,
+  Type,
 } from 'lucide-react';
 import type {
   VisualizerConfig,
@@ -29,6 +30,7 @@ import {
 import { CanvasRenderer } from '../utils/canvasRenderer';
 import { globalAudioEngine } from '../utils/audioEngine';
 import { SafeZoneOverlay } from './SafeZoneOverlay';
+import { OnScreenLyricEditor } from './OnScreenLyricEditor';
 
 interface VisualizerCanvasProps {
   visualizer: VisualizerConfig;
@@ -46,6 +48,10 @@ interface VisualizerCanvasProps {
   onTogglePlay?: () => void;
   previewResolution?: PreviewResolution;
   onPreviewResolutionChange?: (res: PreviewResolution) => void;
+  onSubtitleChange?: (newSubtitle: SubtitleConfig) => void;
+  onSeek?: (time: number) => void;
+  onOpenSubtitleEditor?: () => void;
+  onSave?: (overrideSubtitle?: SubtitleConfig) => void;
 }
 
 export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
@@ -64,6 +70,10 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
   onTogglePlay,
   previewResolution,
   onPreviewResolutionChange,
+  onSubtitleChange,
+  onSeek,
+  onOpenSubtitleEditor,
+  onSave,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -73,12 +83,13 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
   const [isBeatActive, setIsBeatActive] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [safeZone, setSafeZone] = useState<SafeZonePlatform>('none');
+  const [isEditingLyrics, setIsEditingLyrics] = useState<boolean>(false);
   const [internalResolution, setInternalResolution] = useState<PreviewResolution>(() => {
-    const saved = localStorage.getItem('specterr_preview_resolution');
+    const saved = localStorage.getItem('beatflow_preview_resolution') || localStorage.getItem('specterr_preview_resolution');
     if (saved === '1080p' || saved === '720p' || saved === '480p' || saved === '360p') {
       return saved as PreviewResolution;
     }
-    const legacy = localStorage.getItem('specterr_preview_quality');
+    const legacy = localStorage.getItem('beatflow_preview_quality') || localStorage.getItem('specterr_preview_quality');
     if (legacy === 'high') return '1080p';
     return '720p';
   });
@@ -89,7 +100,7 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
   const handleSelectResolution = (res: PreviewResolution) => {
     setInternalResolution(res);
     onPreviewResolutionChange?.(res);
-    localStorage.setItem('specterr_preview_resolution', res);
+    localStorage.setItem('beatflow_preview_resolution', res);
   };
 
   const lastBeatRef = useRef<boolean>(false);
@@ -245,17 +256,31 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
       <div
         ref={containerRef}
         onClick={onTogglePlay}
-        className={`relative flex items-center justify-center rounded-2xl overflow-hidden shadow-2xl shadow-black/80 border border-white/10 group transition-all duration-300 cursor-pointer ${containerClass}`}
+        className={`relative flex items-center justify-center rounded-2xl ${isEditingLyrics ? 'overflow-visible z-30' : 'overflow-hidden'} shadow-2xl shadow-black/80 border border-white/10 group transition-all duration-300 cursor-pointer ${containerClass}`}
       >
         <canvas
           ref={canvasRef}
           width={internalWidth}
           height={internalHeight}
-          className="w-full h-full object-contain block bg-black"
+          className="w-full h-full object-contain block bg-black rounded-2xl"
         />
 
         {/* Safe Zone Guide Visual Overlay */}
         <SafeZoneOverlay platform={safeZone} aspectRatio={aspectRatio} />
+
+        {/* Interactive On-Screen Lyric Editor (Direct in-place editing on preview screen) */}
+        <OnScreenLyricEditor
+          subtitle={subtitle}
+          currentTime={currentTime}
+          isPlaying={isPlaying}
+          containerRef={containerRef}
+          onSubtitleChange={onSubtitleChange}
+          onSeek={onSeek}
+          onTogglePlay={onTogglePlay}
+          onOpenFullModal={onOpenSubtitleEditor}
+          onSave={onSave}
+          onEditingChange={setIsEditingLyrics}
+        />
 
         {/* Top Floating HUD Overlay */}
         <div className="absolute top-2.5 left-2.5 right-2.5 flex items-center justify-between opacity-90 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-200 pointer-events-auto">
@@ -280,6 +305,38 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
             <div className="px-2 sm:px-2.5 py-0.5 sm:py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-[10px] sm:text-[11px] font-mono text-slate-300">
               <span>{aspectRatio}</span>
             </div>
+
+            {/* Quick Subtitle Status / Toggle Button in HUD */}
+            {subtitle && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSubtitleChange?.({
+                    ...subtitle,
+                    enabled: !subtitle.enabled,
+                  });
+                }}
+                className={`px-2 py-0.5 sm:py-1 rounded-lg backdrop-blur-md border text-[10px] sm:text-[11px] font-mono font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer ${
+                  subtitle.enabled
+                    ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 hover:bg-cyan-500/30 shadow-cyan-500/10'
+                    : 'bg-black/60 border-white/10 text-slate-400 hover:text-slate-200'
+                }`}
+                title={
+                  subtitle.enabled
+                    ? 'Lirik Aktif: Klik baris lirik di layar untuk mengedit langsung'
+                    : 'Klik untuk Mengaktifkan Subtitle / Lirik'
+                }
+              >
+                <Type className="w-3 h-3 text-cyan-400 shrink-0" />
+                <span>{subtitle.enabled ? 'LIRIK ON' : 'LIRIK OFF'}</span>
+                {subtitle.enabled && subtitle.lyrics && subtitle.lyrics.length > 0 && (
+                  <span className="text-[9px] bg-cyan-950/80 px-1 py-0.2 rounded border border-cyan-500/30 text-cyan-300">
+                    {subtitle.lyrics.length}
+                  </span>
+                )}
+              </button>
+            )}
 
             {/* Performance Mode / Resolution Dropdown Menu */}
             <div className="relative" onClick={(e) => e.stopPropagation()}>
