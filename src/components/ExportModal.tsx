@@ -21,6 +21,7 @@ import {
   Monitor,
   Square,
   Tv,
+  Cpu,
 } from 'lucide-react';
 import type {
   AspectRatio,
@@ -56,7 +57,7 @@ interface ExportModalProps {
   currentTrack?: AudioTrack;
 }
 
-type ExportTab = 'browser' | 'github';
+type ExportTab = 'browser' | 'github' | 'colab';
 
 export const ExportModal: React.FC<ExportModalProps> = ({
   isOpen,
@@ -564,7 +565,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `specterr-${trackTitle.toLowerCase().replace(/[^a-z0-9]/g, '-')}-project.json`;
+    a.download = `beatflow-${trackTitle.toLowerCase().replace(/[^a-z0-9]/g, '-')}-project.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -605,29 +606,41 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         {/* Tab Selector */}
         {!isExporting && !exportedUrl && (
           <div className="px-3 sm:px-6 pt-3 shrink-0 bg-[#0E131F]">
-            <div className="grid grid-cols-2 p-1 bg-black/50 border border-white/10 rounded-xl">
+            <div className="grid grid-cols-3 p-1 bg-black/50 border border-white/10 rounded-xl gap-1">
               <button
                 onClick={() => handleSelectTab('browser')}
-                className={`py-2 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                className={`py-2 px-1.5 sm:px-2.5 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
                   activeTab === 'browser'
                     ? 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md shadow-cyan-500/20'
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                <Zap className="w-3.5 h-3.5 text-cyan-300" />
-                <span>Browser Fast Export</span>
+                <Zap className="w-3.5 h-3.5 text-cyan-300 shrink-0" />
+                <span className="truncate">Browser</span>
               </button>
 
               <button
                 onClick={() => handleSelectTab('github')}
-                className={`py-2 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                className={`py-2 px-1.5 sm:px-2.5 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
                   activeTab === 'github'
                     ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-500/20'
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                <GitBranch className="w-3.5 h-3.5 text-purple-300" />
-                <span>GitHub Cloud (Free)</span>
+                <GitBranch className="w-3.5 h-3.5 text-purple-300 shrink-0" />
+                <span className="truncate">GitHub Actions</span>
+              </button>
+
+              <button
+                onClick={() => handleSelectTab('colab')}
+                className={`py-2 px-1.5 sm:px-2.5 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                  activeTab === 'colab'
+                    ? 'bg-gradient-to-r from-amber-500 to-orange-600 text-white shadow-md shadow-amber-500/20'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Cpu className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                <span className="truncate">Google Colab</span>
               </button>
             </div>
           </div>
@@ -1168,6 +1181,102 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                     <FileJson className="w-4 h-4 text-cyan-400" />
                     <span>Download Project .JSON</span>
                   </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 3: GOOGLE COLAB GPU RENDER */}
+          {activeTab === 'colab' && (
+            <div className="space-y-4">
+              {/* Hero Banner */}
+              <div className="p-4 rounded-2xl bg-gradient-to-br from-amber-500/15 via-orange-500/10 to-transparent border border-amber-500/30 text-xs space-y-2.5">
+                <div className="flex items-center gap-2 text-amber-300 font-bold text-sm">
+                  <div className="p-1.5 rounded-lg bg-amber-500/20 border border-amber-500/40">
+                    <Cpu className="w-4 h-4 text-amber-400" />
+                  </div>
+                  <span>Google Colab — Akselerasi GPU NVIDIA T4 (Gratis)</span>
+                </div>
+                <p className="text-slate-300 text-[11px] leading-relaxed">
+                  Alternatif terbaik jika Anda ingin render video dengan <strong>kecepatan tinggi</strong>, <strong>tanpa batas kuota menit</strong> seperti GitHub, dan langsung tersimpan otomatis ke <strong>Google Drive</strong> Anda.
+                </p>
+                <div className="flex items-center gap-2 pt-1 flex-wrap">
+                  <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 font-mono text-[10px] border border-amber-500/30">
+                    ⚡ NVIDIA T4 GPU
+                  </span>
+                  <span className="px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 font-mono text-[10px] border border-emerald-500/30">
+                    ☁️ Direct to Google Drive
+                  </span>
+                  <span className="px-2 py-0.5 rounded-md bg-cyan-500/20 text-cyan-300 font-mono text-[10px] border border-cyan-500/30">
+                    ♾️ Tanpa Batas Menit
+                  </span>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <a
+                  href="https://colab.research.google.com/github/ditesvotreamour/render/blob/main/BeatFlow_Studio_Colab_Renderer.ipynb"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="py-3 px-4 rounded-xl bg-gradient-to-r from-amber-500 via-orange-500 to-red-500 hover:from-amber-400 hover:to-orange-400 text-black font-extrabold text-xs shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2 transition-all transform hover:scale-[1.02] active:scale-95"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  <span>Buka di Google Colab</span>
+                </a>
+
+                <button
+                  onClick={handleDownloadProjectJson}
+                  className="py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 border border-white/15 text-slate-200 font-semibold text-xs flex items-center justify-center gap-2 transition-all active:scale-95"
+                  title="Download file konfigurasi proyek JSON untuk di-upload di Colab"
+                >
+                  <Download className="w-4 h-4 text-cyan-400" />
+                  <span>Download Konfigurasi (.JSON)</span>
+                </button>
+              </div>
+
+              {/* 3 Simple Steps Guide */}
+              <div className="p-4 rounded-2xl bg-black/40 border border-white/10 space-y-3">
+                <h4 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                  <span>📌 Cara Menggunakan di Google Colab (3 Langkah):</span>
+                </h4>
+
+                <div className="space-y-2.5 text-xs text-slate-300">
+                  <div className="flex items-start gap-2.5">
+                    <span className="w-5 h-5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold font-mono text-[11px] flex items-center justify-center shrink-0 mt-0.5">
+                      1
+                    </span>
+                    <div>
+                      <strong className="text-white">Buka Notebook & Aktifkan GPU:</strong>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        Klik tombol <em>"Buka di Google Colab"</em> di atas. Di halaman Colab, pastikan GPU aktif melalui menu <code>Runtime ➔ Change runtime type ➔ T4 GPU ➔ Save</code>.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-2.5">
+                    <span className="w-5 h-5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold font-mono text-[11px] flex items-center justify-center shrink-0 mt-0.5">
+                      2
+                    </span>
+                    <div>
+                      <strong className="text-white">Jalankan Setup & Masukkan Proyek:</strong>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        Klik tombol Play pada <strong>Cell 1</strong> untuk setup. Di <strong>Cell 3</strong>, Anda dapat memilih <em>"Upload File Sendiri"</em> (upload file .json dan lagu .mp3) atau memilih <em>"Gunakan dari GitHub"</em>.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-2.5">
+                    <span className="w-5 h-5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold font-mono text-[11px] flex items-center justify-center shrink-0 mt-0.5">
+                      3
+                    </span>
+                    <div>
+                      <strong className="text-white">Render & Dapatkan Video:</strong>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        Jalankan <strong>Cell 4</strong> untuk memulai render dengan GPU. Setelah selesai, jalankan <strong>Cell 5</strong> untuk otomatis mengunduh MP4 ke komputer dan menyimpannya di Google Drive Anda.
+                      </p>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
