@@ -1,11 +1,163 @@
 import type { LyricSegment, LyricWord } from '../types/visualizer';
 
+export type WhisperSTTProvider = 'groq' | 'openai' | 'koboillm' | 'custom';
+
 export class WhisperAIService {
   public static readonly GROQ_API_ENDPOINT = 'https://api.groq.com/openai/v1/audio/transcriptions';
+  public static readonly OPENAI_API_ENDPOINT = 'https://api.openai.com/v1/audio/transcriptions';
+  public static readonly KOBOILLM_API_ENDPOINT = 'https://api.koboillm.com/v1/audio/transcriptions';
   public static readonly DEFAULT_MODEL = 'whisper-large-v3-turbo';
+  public static readonly DEFAULT_GROQ_MODEL = 'whisper-large-v3-turbo';
+  public static readonly DEFAULT_OPENAI_MODEL = 'whisper-1';
 
   /**
-   * Transcribe audio using Groq Whisper API (Sole STT Provider)
+   * Parse verbose_json response from OpenAI, Groq, or custom Whisper API
+   */
+  public static parseWhisperVerboseJson(result: any, idPrefix: string = 'whisper'): LyricSegment[] {
+    if (!result) return [];
+
+    // 1. Process verbose_json with segments array
+    if (result.segments && Array.isArray(result.segments) && result.segments.length > 0) {
+      const segments: LyricSegment[] = [];
+      const globalWords: any[] = Array.isArray(result.words) ? result.words : [];
+
+      result.segments.forEach((seg: any, idx: number) => {
+        const text = (seg.text || '').trim();
+        // Skip pure instrumental / music symbols
+        const clean = text
+          .replace(/^[♪♫🎶\s]+$/g, '')
+          .replace(/^(\[music\]|\(music\)|\(instrumental\)|\(applause\))$/i, '')
+          .trim();
+
+        if (!clean) return;
+
+        let words: LyricWord[] = [];
+        if (seg.words && Array.isArray(seg.words) && seg.words.length > 0) {
+          words = seg.words
+            .map((w: any) => ({
+              word: (w.word || '').trim(),
+              start: Math.round((Number(w.start) || 0) * 100) / 100,
+              end: Math.round((Number(w.end) || 0) * 100) / 100,
+            }))
+            .filter((w: LyricWord) => Boolean(w.word));
+        } else if (globalWords.length > 0) {
+          const matched = globalWords.filter(
+            (w) => w.start >= seg.start - 0.15 && w.end <= seg.end + 0.15
+          );
+          if (matched.length > 0) {
+            words = matched
+              .map((w: any) => ({
+                word: (w.word || '').trim(),
+                start: Math.round((Number(w.start) || 0) * 100) / 100,
+                end: Math.round((Number(w.end) || 0) * 100) / 100,
+              }))
+              .filter((w: LyricWord) => Boolean(w.word));
+          }
+        }
+
+        // Fallback: If no word-level timestamps returned, generate smooth word-by-word steps
+        if (words.length === 0) {
+          const rawWords = clean.split(/\s+/).filter(Boolean);
+          const dur = Math.max(0.1, seg.end - seg.start);
+          const wDur = dur / Math.max(1, rawWords.length);
+          words = rawWords.map((w: string, i: number) => ({
+            word: w,
+            start: Math.round((seg.start + i * wDur) * 100) / 100,
+            end: Math.round((seg.start + (i + 1) * wDur) * 100) / 100,
+          }));
+        }
+
+        segments.push({
+          id: `${idPrefix}-seg-${idx}-${Date.now()}`,
+          start: Math.round((Number(seg.start) || 0) * 100) / 100,
+          end: Math.round((Number(seg.end) || 0) * 100) / 100,
+          text: clean,
+          words,
+        });
+      });
+
+      if (segments.length > 0) {
+        return this.reconstructSubtitlesBySentence(segments, idPrefix);
+      }
+    }
+
+    // 2. Fallback: Process root words array only
+    if (result.words && Array.isArray(result.words) && result.words.length > 0) {
+      const segments: LyricSegment[] = [];
+      let curWords: LyricWord[] = [];
+      let curStart = 0;
+
+      result.words.forEach((w: any, wIdx: number) => {
+        const wordText = (w.word || '').trim();
+        if (!wordText || /^[♪♫🎶\s]+$/.test(wordText)) return;
+
+        const wStart = Math.round((Number(w.start) || 0) * 100) / 100;
+        const wEnd = Math.round((Number(w.end) || 0) * 100) / 100;
+
+        if (curWords.length === 0) {
+          curStart = wStart;
+        }
+
+        curWords.push({ word: wordText, start: wStart, end: wEnd });
+
+        const isLast = wIdx === result.words.length - 1;
+        const nextWord = result.words[wIdx + 1];
+        const hasPause = nextWord && Number(nextWord.start) - wEnd > 0.65;
+        const hasPunctuation = /[.?!,]$/.test(wordText);
+        const reachedMaxWords = curWords.length >= 7;
+
+        if (isLast || hasPause || (curWords.length >= 4 && hasPunctuation) || reachedMaxWords) {
+          const segEnd = wEnd;
+          const segText = curWords.map((cw) => cw.word).join(' ');
+          segments.push({
+            id: `${idPrefix}-words-${segments.length}-${Date.now()}`,
+            start: curStart,
+            end: segEnd,
+            text: segText,
+            words: [...curWords],
+          });
+          curWords = [];
+        }
+      });
+
+      if (segments.length > 0) return segments;
+    }
+
+    // 3. Fallback: Plain text output evenly timed
+    if (result.text && typeof result.text === 'string') {
+      const textLines = result.text
+        .split(/(?<=[.?!,\n])\s+/)
+        .map((t: string) => t.trim())
+        .filter((t: string) => t.length > 0);
+
+      if (textLines.length > 0) {
+        const count = textLines.length;
+        const segmentDuration = Math.min(5.0, Math.max(2.5, 60 / count));
+        return textLines.map((lineText: string, idx: number) => {
+          const start = idx * segmentDuration;
+          const end = start + segmentDuration;
+          const rawWords = lineText.split(/\s+/).filter(Boolean);
+          const wDur = (end - start) / Math.max(1, rawWords.length);
+          return {
+            id: `${idPrefix}-text-${idx}-${Date.now()}`,
+            start: Math.round(start * 100) / 100,
+            end: Math.round(end * 100) / 100,
+            text: lineText,
+            words: rawWords.map((w, i) => ({
+              word: w,
+              start: Math.round((start + i * wDur) * 100) / 100,
+              end: Math.round((start + (i + 1) * wDur) * 100) / 100,
+            })),
+          };
+        });
+      }
+    }
+
+    return [];
+  }
+
+  /**
+   * Transcribe audio using Groq Whisper API (Ultra-Fast LPU)
    */
   public static async transcribeWithGroq(
     audioBlob: Blob | File,
@@ -24,13 +176,11 @@ export class WhisperAIService {
       );
     }
 
-    const model = options.model || this.DEFAULT_MODEL;
+    const model = options.model || this.DEFAULT_GROQ_MODEL;
     const language = options.language;
 
     if (onStatus) onStatus('Memeriksa dan menyiapkan file audio...');
 
-    // Groq limits file upload size to 25MB.
-    // If blob exceeds 20MB, resample and downmix to 16kHz mono WAV to guarantee fast upload (< 10MB)
     let uploadBlob: Blob = audioBlob;
     let fileName = audioBlob instanceof File ? audioBlob.name : 'audio.wav';
 
@@ -102,143 +252,285 @@ export class WhisperAIService {
     if (onStatus) onStatus('Memproses hasil transkripsi dan menyusun sinkronisasi kata...');
 
     const result = await response.json().catch(() => null);
-
     if (!result) {
       throw new Error('Groq API tidak mengembalikan respon JSON yang valid.');
     }
 
-    // 1. Process verbose_json with segments array
-    if (result.segments && Array.isArray(result.segments) && result.segments.length > 0) {
-      const segments: LyricSegment[] = [];
-      const globalWords: any[] = Array.isArray(result.words) ? result.words : [];
-
-      result.segments.forEach((seg: any, idx: number) => {
-        const text = (seg.text || '').trim();
-        // Skip pure instrumental / music symbols
-        const clean = text
-          .replace(/^[♪♫🎶\s]+$/g, '')
-          .replace(/^(\[music\]|\(music\)|\(instrumental\)|\(applause\))$/i, '')
-          .trim();
-
-        if (!clean) return;
-
-        let words: LyricWord[] = [];
-        if (seg.words && Array.isArray(seg.words) && seg.words.length > 0) {
-          words = seg.words.map((w: any) => ({
-            word: (w.word || '').trim(),
-            start: Math.round((Number(w.start) || 0) * 100) / 100,
-            end: Math.round((Number(w.end) || 0) * 100) / 100,
-          })).filter((w: LyricWord) => Boolean(w.word));
-        } else if (globalWords.length > 0) {
-          const matched = globalWords.filter(
-            (w) => w.start >= seg.start - 0.15 && w.end <= seg.end + 0.15
-          );
-          if (matched.length > 0) {
-            words = matched.map((w: any) => ({
-              word: (w.word || '').trim(),
-              start: Math.round((Number(w.start) || 0) * 100) / 100,
-              end: Math.round((Number(w.end) || 0) * 100) / 100,
-            })).filter((w: LyricWord) => Boolean(w.word));
-          }
-        }
-
-        // Fallback: If no word-level timestamps returned, generate smooth word-by-word steps
-        if (words.length === 0) {
-          const rawWords = clean.split(/\s+/).filter(Boolean);
-          const dur = Math.max(0.1, seg.end - seg.start);
-          const wDur = dur / Math.max(1, rawWords.length);
-          words = rawWords.map((w: string, i: number) => ({
-            word: w,
-            start: Math.round((seg.start + i * wDur) * 100) / 100,
-            end: Math.round((seg.start + (i + 1) * wDur) * 100) / 100,
-          }));
-        }
-
-        segments.push({
-          id: `groq-seg-${idx}-${Date.now()}`,
-          start: Math.round((Number(seg.start) || 0) * 100) / 100,
-          end: Math.round((Number(seg.end) || 0) * 100) / 100,
-          text: clean,
-          words,
-        });
-      });
-
-      if (segments.length > 0) return segments;
+    const segments = this.parseWhisperVerboseJson(result, 'groq');
+    if (segments.length === 0) {
+      throw new Error('Groq Whisper tidak mendeteksi vokal atau kata yang jelas pada audio.');
     }
 
-    // 2. Fallback: Process root words array only
-    if (result.words && Array.isArray(result.words) && result.words.length > 0) {
-      const segments: LyricSegment[] = [];
-      let curWords: LyricWord[] = [];
-      let curStart = 0;
+    return segments;
+  }
 
-      result.words.forEach((w: any, wIdx: number) => {
-        const wordText = (w.word || '').trim();
-        if (!wordText || /^[♪♫🎶\s]+$/.test(wordText)) return;
-
-        const wStart = Math.round((Number(w.start) || 0) * 100) / 100;
-        const wEnd = Math.round((Number(w.end) || 0) * 100) / 100;
-
-        if (curWords.length === 0) {
-          curStart = wStart;
-        }
-
-        curWords.push({ word: wordText, start: wStart, end: wEnd });
-
-        const isLast = wIdx === result.words.length - 1;
-        const nextWord = result.words[wIdx + 1];
-        const hasPause = nextWord && Number(nextWord.start) - wEnd > 0.65;
-        const hasPunctuation = /[.?!,]$/.test(wordText);
-        const reachedMaxWords = curWords.length >= 7;
-
-        if (isLast || hasPause || (curWords.length >= 4 && hasPunctuation) || reachedMaxWords) {
-          const segEnd = wEnd;
-          const segText = curWords.map((cw) => cw.word).join(' ');
-          segments.push({
-            id: `groq-words-${segments.length}-${Date.now()}`,
-            start: curStart,
-            end: segEnd,
-            text: segText,
-            words: [...curWords],
-          });
-          curWords = [];
-        }
-      });
-
-      if (segments.length > 0) return segments;
+  /**
+   * Transcribe audio using OpenAI Official Whisper API (High Precision Whisper AI)
+   */
+  public static async transcribeWithOpenAI(
+    audioBlob: Blob | File,
+    apiKey: string,
+    options: {
+      model?: string;
+      language?: string;
+      prompt?: string;
+      endpoint?: string;
+    } = {},
+    onStatus?: (status: string) => void
+  ): Promise<LyricSegment[]> {
+    const cleanKey = (apiKey || '').trim();
+    if (!cleanKey) {
+      throw new Error(
+        'OpenAI API Key diperlukan. Silakan masukkan API Key Anda (diawali dengan sk-...). Dapatkan di platform.openai.com/api-keys.'
+      );
     }
 
-    // 3. Fallback: Plain text output evenly timed
-    if (result.text && typeof result.text === 'string') {
-      const textLines = result.text
-        .split(/(?<=[.?!,\n])\s+/)
-        .map((t: string) => t.trim())
-        .filter((t: string) => t.length > 0);
+    const endpoint = (options.endpoint || '').trim() || this.OPENAI_API_ENDPOINT;
+    const isKoboiLLM = endpoint.includes('koboillm');
+    let model = options.model || (isKoboiLLM ? 'openai/whisper-1' : this.DEFAULT_OPENAI_MODEL);
+    if (isKoboiLLM && model === 'whisper-1') {
+      model = 'openai/whisper-1';
+    }
+    const language = options.language;
 
-      if (textLines.length > 0) {
-        const count = textLines.length;
-        const segmentDuration = Math.min(5.0, Math.max(2.5, 60 / count));
-        return textLines.map((lineText: string, idx: number) => {
-          const start = idx * segmentDuration;
-          const end = start + segmentDuration;
-          const rawWords = lineText.split(/\s+/).filter(Boolean);
-          const wDur = (end - start) / Math.max(1, rawWords.length);
-          return {
-            id: `groq-text-${idx}-${Date.now()}`,
-            start: Math.round(start * 100) / 100,
-            end: Math.round(end * 100) / 100,
-            text: lineText,
-            words: rawWords.map((w, i) => ({
-              word: w,
-              start: Math.round((start + i * wDur) * 100) / 100,
-              end: Math.round((start + (i + 1) * wDur) * 100) / 100,
-            })),
-          };
-        });
+    if (onStatus) onStatus(`Memeriksa dan menyiapkan file audio untuk ${isKoboiLLM ? 'KoboiLLM' : 'OpenAI'} Whisper...`);
+
+    let uploadBlob: Blob = audioBlob;
+    let fileName = audioBlob instanceof File ? audioBlob.name : 'audio.wav';
+
+    // OpenAI limits to 25MB
+    if (audioBlob.size > 20 * 1024 * 1024) {
+      if (onStatus) onStatus('Mengompresi audio ke 16kHz mono untuk mengoptimalkan kuota upload 25MB...');
+      try {
+        const floatData = await this.decodeAudioTo16kHz(audioBlob);
+        uploadBlob = this.audioBufferToWavBlob(floatData, 16000);
+        fileName = 'audio_16khz.wav';
+      } catch (downsampleErr) {
+        console.warn('Gagal melakukan downsample audio, mengunggah file asli:', downsampleErr);
       }
     }
 
-    throw new Error('Tidak ada vokal atau kata yang terdeteksi dalam file audio ini.');
+    if (onStatus) onStatus(`Mengirim audio ke ${isKoboiLLM ? 'KoboiLLM Gateway' : 'OpenAI Whisper API'} (${model})...`);
+
+    const formData = new FormData();
+    formData.append('file', uploadBlob, fileName);
+    formData.append('model', model);
+    formData.append('response_format', 'verbose_json');
+    formData.append('timestamp_granularities[]', 'segment');
+    formData.append('timestamp_granularities[]', 'word');
+
+    if (language && language !== 'auto') {
+      formData.append('language', language);
+    }
+
+    if (options.prompt) {
+      formData.append('prompt', options.prompt);
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${cleanKey}`,
+        },
+        body: formData,
+      });
+    } catch (netErr: any) {
+      throw new Error(
+        `Gagal terhubung ke API Whisper (${endpoint}): ${netErr.message || 'Network / CORS Error'}. Periksa koneksi internet Anda.`
+      );
+    }
+
+    if (!response.ok) {
+      const errJson = await response.json().catch(() => ({}));
+      const msg = errJson?.error?.message || errJson?.message || `HTTP ${response.status} ${response.statusText}`;
+
+      if (response.status === 401) {
+        if (isKoboiLLM) {
+          throw new Error(
+            `KoboiLLM API Key tidak valid (401 Unauthorized): ${msg}. Pastikan API Key benar dari https://koboillm.com`
+          );
+        }
+        throw new Error(
+          `OpenAI API Key tidak valid (401 Unauthorized): ${msg}. Pastikan API Key benar dari https://platform.openai.com/api-keys`
+        );
+      }
+      if (response.status === 429) {
+        if (isKoboiLLM) {
+          throw new Error(
+            `KoboiLLM Kuota / Saldo tercapai (429): ${msg}. Pastikan saldo akun KoboiLLM Anda mencukupi di https://koboillm.com.`
+          );
+        }
+        throw new Error(
+          `OpenAI API Quota / Rate limit tercapai (429): ${msg}. Pastikan akun OpenAI Anda memiliki credit/saldo aktif.`
+        );
+      }
+      if (response.status === 413) {
+        throw new Error(
+          'Ukuran file audio melebihi batas 25MB. Silakan gunakan potongan lagu atau file berdurasi lebih pendek.'
+        );
+      }
+      throw new Error(`Whisper API Error (${response.status}): ${msg}`);
+    }
+
+    if (onStatus) onStatus('Memproses hasil transkripsi dan menyusun sinkronisasi kata...');
+
+    const result = await response.json().catch(() => null);
+    if (!result) {
+      throw new Error('API tidak mengembalikan respon JSON yang valid.');
+    }
+
+    const segments = this.parseWhisperVerboseJson(result, isKoboiLLM ? 'koboillm' : 'openai');
+    if (segments.length === 0) {
+      throw new Error('Whisper tidak mendeteksi teks vokal yang jelas pada audio.');
+    }
+
+    return segments;
+  }
+
+  /**
+   * Transcribe audio using KoboiLLM AI Gateway (koboillm.com - OpenAI Whisper whisper-1)
+   */
+  public static async transcribeWithKoboiLLM(
+    audioBlob: Blob | File,
+    apiKey: string,
+    options: {
+      model?: string;
+      language?: string;
+      prompt?: string;
+    } = {},
+    onStatus?: (status: string) => void
+  ): Promise<LyricSegment[]> {
+    return this.transcribeWithOpenAI(
+      audioBlob,
+      apiKey,
+      {
+        ...options,
+        endpoint: this.KOBOILLM_API_ENDPOINT,
+      },
+      onStatus
+    );
+  }
+
+  /**
+   * Transcribe audio using a Custom or Local Whisper Endpoint (faster-whisper, whisper.cpp, Cloudflare, etc.)
+   */
+  public static async transcribeWithCustomEndpoint(
+    audioBlob: Blob | File,
+    endpointUrl: string,
+    apiKey?: string,
+    options: {
+      model?: string;
+      language?: string;
+      prompt?: string;
+    } = {},
+    onStatus?: (status: string) => void
+  ): Promise<LyricSegment[]> {
+    const cleanEndpoint = (endpointUrl || '').trim();
+    if (!cleanEndpoint) {
+      throw new Error('Endpoint URL Whisper server lokal/custom belum diisi.');
+    }
+
+    const model = options.model || 'whisper-1';
+    const language = options.language;
+
+    if (onStatus) onStatus('Menyiapkan audio untuk Custom Whisper Server...');
+
+    let uploadBlob: Blob = audioBlob;
+    let fileName = audioBlob instanceof File ? audioBlob.name : 'audio.wav';
+
+    if (audioBlob.size > 20 * 1024 * 1024) {
+      try {
+        const floatData = await this.decodeAudioTo16kHz(audioBlob);
+        uploadBlob = this.audioBufferToWavBlob(floatData, 16000);
+        fileName = 'audio_16khz.wav';
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (onStatus) onStatus(`Mengirim audio ke ${cleanEndpoint}...`);
+
+    const formData = new FormData();
+    formData.append('file', uploadBlob, fileName);
+    formData.append('model', model);
+    formData.append('response_format', 'verbose_json');
+    formData.append('timestamp_granularities[]', 'segment');
+    formData.append('timestamp_granularities[]', 'word');
+
+    if (language && language !== 'auto') {
+      formData.append('language', language);
+    }
+    if (options.prompt) {
+      formData.append('prompt', options.prompt);
+    }
+
+    const headers: Record<string, string> = {};
+    if (apiKey && apiKey.trim()) {
+      headers['Authorization'] = `Bearer ${apiKey.trim()}`;
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(cleanEndpoint, {
+        method: 'POST',
+        headers,
+        body: formData,
+      });
+    } catch (netErr: any) {
+      throw new Error(`Gagal menghubungi Whisper endpoint: ${netErr.message || 'CORS / Network Error'}`);
+    }
+
+    if (!response.ok) {
+      const errJson = await response.json().catch(() => ({}));
+      const msg = errJson?.error?.message || errJson?.message || `HTTP ${response.status} ${response.statusText}`;
+      throw new Error(`Whisper Server Error (${response.status}): ${msg}`);
+    }
+
+    if (onStatus) onStatus('Memproses hasil transkripsi...');
+    const result = await response.json().catch(() => null);
+    if (!result) throw new Error('Respon server bukan format JSON yang valid.');
+
+    const segments = this.parseWhisperVerboseJson(result, 'custom');
+    if (segments.length === 0) {
+      throw new Error('Whisper Server tidak mendeteksi teks vokal yang jelas pada audio.');
+    }
+
+    return segments;
+  }
+
+  /**
+   * Unified transcription entry point across Groq, OpenAI, and Custom STT providers
+   */
+  public static async transcribe(
+    audioBlob: Blob | File,
+    provider: WhisperSTTProvider,
+    apiKey: string,
+    options: {
+      model?: string;
+      language?: string;
+      prompt?: string;
+      customEndpoint?: string;
+    } = {},
+    onStatus?: (status: string) => void
+  ): Promise<LyricSegment[]> {
+    if (provider === 'openai') {
+      return this.transcribeWithOpenAI(audioBlob, apiKey, options, onStatus);
+    }
+    if (provider === 'koboillm') {
+      return this.transcribeWithKoboiLLM(audioBlob, apiKey, options, onStatus);
+    }
+    if (provider === 'custom') {
+      return this.transcribeWithCustomEndpoint(
+        audioBlob,
+        options.customEndpoint || 'http://localhost:8000/v1/audio/transcriptions',
+        apiKey,
+        options,
+        onStatus
+      );
+    }
+    return this.transcribeWithGroq(audioBlob, apiKey, options, onStatus);
   }
 
   /**
@@ -594,5 +886,133 @@ export class WhisperAIService {
     const msStr = String(ms).padStart(3, '0');
 
     return `${hStr}:${mStr}:${sStr},${msStr}`;
+  }
+
+  /**
+   * Reconstructs lyric segments into complete, grammatical sentences ending with punctuation,
+   * formatted for clean single-line display with strictly non-colliding continuous flow.
+   */
+  public static reconstructSubtitlesBySentence(
+    rawSegments: LyricSegment[],
+    idPrefix: string = 'sentence'
+  ): LyricSegment[] {
+    if (!rawSegments || rawSegments.length === 0) return [];
+
+    interface WordEntry {
+      word: string;
+      start: number;
+      end: number;
+    }
+    const allWords: WordEntry[] = [];
+
+    for (const seg of rawSegments) {
+      if (!seg.text || !seg.text.trim()) continue;
+      const cleanText = seg.text.trim();
+      if (seg.words && seg.words.length > 0) {
+        for (const w of seg.words) {
+          const wt = (w.word || '').trim();
+          if (wt) {
+            allWords.push({
+              word: wt,
+              start: Number(w.start) || seg.start,
+              end: Number(w.end) || seg.end,
+            });
+          }
+        }
+      } else {
+        const splitWords = cleanText.split(/\s+/).filter(Boolean);
+        const segDur = Math.max(0.2, seg.end - seg.start);
+        const wDur = segDur / Math.max(1, splitWords.length);
+        splitWords.forEach((sw, i) => {
+          allWords.push({
+            word: sw,
+            start: Number((seg.start + i * wDur).toFixed(3)),
+            end: Number((seg.start + (i + 1) * wDur).toFixed(3)),
+          });
+        });
+      }
+    }
+
+    if (allWords.length === 0) return rawSegments;
+
+    // Ensure words are chronologically sorted
+    allWords.sort((a, b) => a.start - b.start);
+
+    // Group words into sentences ending with punctuation or speech pauses
+    const reconstructed: LyricSegment[] = [];
+    let currentWords: WordEntry[] = [];
+    let currentStart = allWords[0].start;
+
+    for (let i = 0; i < allWords.length; i++) {
+      const w = allWords[i];
+      if (currentWords.length === 0) {
+        currentStart = w.start;
+      }
+      currentWords.push(w);
+
+      const isLastWord = i === allWords.length - 1;
+      const nextWord = allWords[i + 1];
+
+      // Terminal punctuation (. ? ! ; :) or clause comma
+      const endsWithTerminal = /[.?!;:]$/.test(w.word);
+      const endsWithComma = /[,—–]$/.test(w.word);
+
+      // Audio pause to next word
+      const pauseToNext = nextWord ? nextWord.start - w.end : 0;
+      const hasLongPause = pauseToNext >= 0.55;
+      const hasMediumPause = pauseToNext >= 0.35;
+
+      const wordCount = currentWords.length;
+
+      // Break condition:
+      // 1. Terminal punctuation (. ? ! ; :)
+      // 2. Significant pause in speech
+      // 3. Comma followed by a breath pause or after at least 4 words
+      // 4. Maximum comfortable words for a single horizontal line (>= 9 words)
+      // 5. Final word
+      const shouldBreak =
+        isLastWord ||
+        endsWithTerminal ||
+        hasLongPause ||
+        (endsWithComma && (hasMediumPause || wordCount >= 4)) ||
+        wordCount >= 9;
+
+      if (shouldBreak) {
+        const segEnd = Math.max(w.end, currentStart + 0.4);
+        const sentenceText = currentWords.map((cw) => cw.word).join(' ').trim();
+
+        reconstructed.push({
+          id: `${idPrefix}-${reconstructed.length}-${Date.now()}`,
+          start: Number(currentStart.toFixed(2)),
+          end: Number(segEnd.toFixed(2)),
+          text: sentenceText,
+          words: currentWords.map((cw) => ({
+            word: cw.word,
+            start: Number(cw.start.toFixed(2)),
+            end: Number(cw.end.toFixed(2)),
+          })),
+        });
+
+        currentWords = [];
+      }
+    }
+
+    // STRICT NON-COLLISION POST-PROCESSING:
+    // Ensure every sentence connects seamlessly without overlapping the next
+    for (let i = 0; i < reconstructed.length; i++) {
+      const curr = reconstructed[i];
+      const next = reconstructed[i + 1];
+
+      if (next) {
+        if (curr.end > next.start) {
+          curr.end = Math.max(curr.start + 0.2, next.start);
+        } else if (next.start - curr.end < 0.15) {
+          // Seamless bridging if gap is negligible
+          curr.end = next.start;
+        }
+      }
+    }
+
+    return reconstructed;
   }
 }

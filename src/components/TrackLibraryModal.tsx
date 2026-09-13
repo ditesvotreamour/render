@@ -412,7 +412,7 @@ export const TrackLibraryModal: React.FC<TrackLibraryModalProps> = ({
                 <div className="pt-3 border-t border-white/10 space-y-2">
                   <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5 px-1">
                     <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Lagu Sampel Bawaan Specterr</span>
+                    <span>Lagu Sampel Bawaan BeatFlow</span>
                   </div>
 
                   {filteredSamples.map((track) => {

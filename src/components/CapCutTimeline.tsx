@@ -28,14 +28,52 @@ import {
   ChevronLeft,
   ChevronRight,
   FolderOpen,
+  FolderArchive,
   Sparkles,
+  ArrowLeftRight,
+  ChevronsLeft,
+  ChevronsRight,
+  Video,
+  Film,
+  Sliders,
+  Eye,
+  EyeOff,
+  Zap,
+  Wand2,
 } from 'lucide-react';
-import type { AudioTrack, SubtitleConfig, BackgroundConfig, CenterLogoConfig, SlideItem } from '../types/visualizer';
+import type {
+  AudioTrack,
+  SubtitleConfig,
+  BackgroundConfig,
+  CenterLogoConfig,
+  SlideItem,
+  BRollClip,
+  BRollDisplayMode,
+  VisualEffectType,
+  TimelineFxClip,
+} from '../types/visualizer';
+import { VISUAL_EFFECT_OPTIONS } from '../types/visualizer';
 import { SAMPLE_TRACKS } from '../data/sampleTracks';
 import { globalAudioEngine } from '../utils/audioEngine';
-import { AudioTrimmerJoiner, sliceLyrics } from '../utils/audioTrimmerJoiner';
+import { AudioTrimmerJoiner, sliceLyricsMultiSegments } from '../utils/audioTrimmerJoiner';
+import { WhisperAIService } from '../utils/whisperAi';
 import { AiLyricImageModal } from './AiLyricImageModal';
-import { heuristicMatchImagesToLyrics } from '../utils/aiLyricImageMatcher';
+import { BRollModal } from './BRollModal';
+import { AiVisualEffectsModal } from './AiVisualEffectsModal';
+import {
+  heuristicMatchImagesToLyrics,
+  fillTimelineSlideGaps,
+  parseTimestampFromFilename,
+} from '../utils/aiLyricImageMatcher';
+import {
+  isZipFile,
+  isZipBlob,
+  processFilesWithZipExtraction,
+  isVideoMedia,
+  registerMediaUrl,
+  getMediaUrlType,
+  isVideoFile,
+} from '../utils/zipImageExtractor';
 
 interface CapCutTimelineProps {
   currentTrack: AudioTrack;
@@ -86,11 +124,72 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
   const [isLooping, setIsLooping] = useState<boolean>(true);
   const [showTrackDropdown, setShowTrackDropdown] = useState<boolean>(false);
 
-  // In-Timeline Trim state
+  // In-Timeline Trim & Audio Clips state (CapCut Multi-Clip Splitter)
   const [trimRange, setTrimRange] = useState<{ start: number; end: number } | null>(null);
-  const [selectedClip, setSelectedClip] = useState<'audio' | 'subtitle' | 'image' | null>('audio');
+  const [selectedClip, setSelectedClip] = useState<'audio' | 'subtitle' | 'image' | 'broll' | null>('audio');
+  const [isBRollModalOpen, setIsBRollModalOpen] = useState<boolean>(false);
+  const [bRollModalTab, setBRollModalTab] = useState<'clips' | 'presets' | 'stock' | 'ai'>('clips');
+  const [selectedBRollId, setSelectedBRollId] = useState<string | null>(null);
+  const [isAiEffectModalOpen, setIsAiEffectModalOpen] = useState<boolean>(false);
   const [isApplyingTrim, setIsApplyingTrim] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Timeline Track Rows Visibility State (Sembunyikan / Tampilkan Baris Media)
+  const [trackVisibility, setTrackVisibility] = useState<{
+    audio: boolean;
+    media: boolean;
+    broll: boolean;
+    subtitle: boolean;
+  }>(() => {
+    try {
+      const saved = localStorage.getItem('capcut_timeline_track_visibility');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          audio: parsed.audio ?? true,
+          media: parsed.media ?? true,
+          broll: parsed.broll ?? true,
+          subtitle: parsed.subtitle ?? true,
+        };
+      }
+    } catch {
+      // Ignore JSON parse errors
+    }
+    return {
+      audio: true,
+      media: true,
+      broll: true,
+      subtitle: true,
+    };
+  });
+  const [showTrackVisibilityMenu, setShowTrackVisibilityMenu] = useState<boolean>(false);
+
+  // Audio Clips for CapCut track splitting & dragging
+  const [audioClips, setAudioClips] = useState<
+    Array<{
+      id: string;
+      start: number;
+      end: number;
+      name: string;
+      sourceStart?: number;
+      sourceEnd?: number;
+    }>
+  >([
+    { id: 'clip-1', start: 0, end: duration > 0 ? duration : 180, name: 'Trek 1', sourceStart: 0, sourceEnd: duration > 0 ? duration : 180 },
+  ]);
+  const [selectedAudioClipId, setSelectedAudioClipId] = useState<string | null>('clip-1');
+
+  // Dragging & Moving Audio Clip state (Geser MP3 CapCut)
+  const [draggingAudioClipId, setDraggingAudioClipId] = useState<string | null>(null);
+  const [draggingAudioEdge, setDraggingAudioEdge] = useState<'left' | 'right' | null>(null);
+  const dragAudioRef = useRef<{
+    startX: number;
+    origStart: number;
+    origEnd: number;
+    clipDuration: number;
+    clipId: string;
+    edge: 'body' | 'left' | 'right';
+  } | null>(null);
 
   // Image Track state
   const [pendingImageUrl, setPendingImageUrl] = useState<string | null>(null);
@@ -99,8 +198,11 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
   const [isDraggingMediaOver, setIsDraggingMediaOver] = useState<boolean>(false);
   const [draggedSlideIndex, setDraggedSlideIndex] = useState<number | null>(null);
   const [showAiMatchModal, setShowAiMatchModal] = useState<boolean>(false);
-  const [imageFileStore, setImageFileStore] = useState<Array<{ url: string; name: string }>>([]);
+  const [imageFileStore, setImageFileStore] = useState<Array<{ url: string; name: string; mediaType?: 'image' | 'video' }>>([]);
   const imageFileInputRef = useRef<HTMLInputElement>(null);
+  const zipFileInputRef = useRef<HTMLInputElement>(null);
+  const [isExtractingZip, setIsExtractingZip] = useState<boolean>(false);
+  const [zipProgress, setZipProgress] = useState<{ percent: number; message: string }>({ percent: 0, message: '' });
 
   const timelineContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -108,6 +210,135 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
   const isDraggingTrimHandleRef = useRef<'start' | 'end' | null>(null);
 
   const effectiveDuration = duration > 0 ? duration : 180;
+
+  const prevTrackIdRef = useRef<string>(currentTrack.id);
+
+  // Sync audio clips when current track changes
+  useEffect(() => {
+    if (prevTrackIdRef.current !== currentTrack.id) {
+      prevTrackIdRef.current = currentTrack.id;
+      setAudioClips([
+        {
+          id: 'clip-1',
+          start: 0,
+          end: effectiveDuration,
+          name: 'Trek 1',
+          sourceStart: 0,
+          sourceEnd: effectiveDuration,
+        },
+      ]);
+      setSelectedAudioClipId('clip-1');
+      setTrimRange(null);
+      globalAudioEngine.setTrimRange(null);
+      globalAudioEngine.setActiveSegments(null);
+    } else {
+      // If track is the same, but duration just resolved from fallback to actual track duration on first load
+      setAudioClips((prev) => {
+        if (
+          prev.length === 1 &&
+          prev[0].start === 0 &&
+          (prev[0].end === 180 || prev[0].end === 0) &&
+          (prev[0].sourceStart === 0 || prev[0].sourceStart === undefined)
+        ) {
+          return [
+            {
+              ...prev[0],
+              end: effectiveDuration,
+              sourceEnd: effectiveDuration,
+            },
+          ];
+        }
+        return prev;
+      });
+    }
+  }, [currentTrack.id, effectiveDuration]);
+
+  // Synchronize active playback segments with globalAudioEngine so deleted parts are skipped live
+  useEffect(() => {
+    if (trimRange) {
+      globalAudioEngine.setActiveSegments([
+        { start: trimRange.start, end: trimRange.end },
+      ]);
+    } else if (audioClips.length > 0) {
+      const activeSegs = audioClips.map((c) => ({
+        start: c.sourceStart ?? c.start,
+        end: c.sourceEnd ?? c.end,
+      }));
+      // Check if segments actually cut any part of original track
+      const isModified =
+        audioClips.length > 1 ||
+        (audioClips.length === 1 &&
+          ((audioClips[0].sourceStart ?? audioClips[0].start) > 0.3 ||
+            (audioClips[0].sourceEnd ?? audioClips[0].end) < effectiveDuration - 0.3));
+
+      if (isModified) {
+        globalAudioEngine.setActiveSegments(activeSegs);
+      } else {
+        globalAudioEngine.setActiveSegments(null);
+      }
+    } else {
+      globalAudioEngine.setActiveSegments(null);
+    }
+  }, [audioClips, trimRange, effectiveDuration]);
+
+  const totalAudioClipsDuration = useMemo(
+    () => audioClips.reduce((sum, c) => sum + Math.max(0, c.end - c.start), 0),
+    [audioClips]
+  );
+
+  const isAudioClipsModified = useMemo(
+    () =>
+      audioClips.length > 1 ||
+      (audioClips.length === 1 &&
+        ((audioClips[0].sourceStart ?? audioClips[0].start) > 0.5 ||
+          (audioClips[0].sourceEnd ?? audioClips[0].end) < effectiveDuration - 0.5)),
+    [audioClips, effectiveDuration]
+  );
+
+  // Gaps (Ruang Kosong) calculation between audio clips
+  const audioGaps = useMemo(() => {
+    if (audioClips.length === 0) return [];
+    const sorted = [...audioClips].sort((a, b) => a.start - b.start);
+    const gaps: Array<{
+      id: string;
+      start: number;
+      end: number;
+      duration: number;
+      isBeforeFirst: boolean;
+      afterClipIndex: number;
+    }> = [];
+
+    // 1. Gap before the first clip
+    if (sorted[0].start > 0.15) {
+      gaps.push({
+        id: 'gap-start',
+        start: 0,
+        end: sorted[0].start,
+        duration: sorted[0].start,
+        isBeforeFirst: true,
+        afterClipIndex: -1,
+      });
+    }
+
+    // 2. Gaps between consecutive clips
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const curEnd = sorted[i].end;
+      const nextStart = sorted[i + 1].start;
+      const gapDur = nextStart - curEnd;
+      if (gapDur > 0.15) {
+        gaps.push({
+          id: `gap-${sorted[i].id}-${sorted[i + 1].id}`,
+          start: curEnd,
+          end: nextStart,
+          duration: gapDur,
+          isBeforeFirst: false,
+          afterClipIndex: i,
+        });
+      }
+    }
+
+    return gaps;
+  }, [audioClips]);
 
   // Available images for AI Matcher
   const availableImagesForAi = useMemo(() => {
@@ -140,7 +371,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
     setSelectedClip('image');
   };
 
-  // Compute image clips for the timeline
+  // Compute image/video clips for the timeline
   const imageClips = useMemo(() => {
     const clips: {
       id: string;
@@ -154,17 +385,22 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
       slideIndex?: number;
       originalIndex?: number;
       duration?: number;
+      mediaType?: 'image' | 'video';
+      visualEffect?: VisualEffectType;
+      visualEffectIntensity?: number;
     }[] = [];
 
-    // 1. Multi-image slides
+    // 1. Multi-image/video slides
     if (backgroundConfig.type === 'multi_image') {
       if (backgroundConfig.multiImageSlides && backgroundConfig.multiImageSlides.length > 0) {
         backgroundConfig.multiImageSlides.forEach((slide, idx) => {
+          const mediaType = slide.mediaType || getMediaUrlType(slide.url, slide.name);
+          const isVid = mediaType === 'video';
           clips.push({
             id: slide.id || `slide-${idx}`,
             type: 'slide',
             url: slide.url,
-            title: slide.name || `Foto ${idx + 1}`,
+            title: slide.name || (isVid ? `Video ${idx + 1}` : `Foto ${idx + 1}`),
             startSec: slide.startSec,
             endSec: slide.endSec,
             startPct: (slide.startSec / effectiveDuration) * 100,
@@ -172,6 +408,9 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
             slideIndex: idx + 1,
             originalIndex: idx,
             duration: slide.endSec - slide.startSec,
+            mediaType,
+            visualEffect: slide.visualEffect || 'none',
+            visualEffectIntensity: slide.visualEffectIntensity,
           });
         });
       } else if (backgroundConfig.multiImageUrls && backgroundConfig.multiImageUrls.length > 0) {
@@ -187,11 +426,15 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
           if (start >= effectiveDuration) break;
           const end = Math.min(effectiveDuration, (i + 1) * interval);
           const originalIndex = i % count;
+          const url = urls[originalIndex];
+          const stored = imageFileStore.find((item) => item.url === url);
+          const mediaType = getMediaUrlType(url, stored?.name);
+          const isVid = mediaType === 'video';
           clips.push({
             id: `slide-${i}-${originalIndex}`,
             type: 'slide',
-            url: urls[originalIndex],
-            title: `Foto ${originalIndex + 1}`,
+            url,
+            title: stored?.name || (isVid ? `Video ${originalIndex + 1}` : `Foto ${originalIndex + 1}`),
             startSec: start,
             endSec: end,
             startPct: (start / effectiveDuration) * 100,
@@ -199,21 +442,25 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
             slideIndex: originalIndex + 1,
             originalIndex,
             duration: end - start,
+            mediaType,
+            visualEffect: 'none',
           });
         }
       }
     } else if (backgroundConfig.customImageUrl) {
-      // 2. Custom background single image
+      // 2. Custom background single image or video
+      const mediaType = getMediaUrlType(backgroundConfig.customImageUrl);
       clips.push({
         id: 'bg-single',
         type: 'background',
         url: backgroundConfig.customImageUrl,
-        title: 'Background Wallpaper',
+        title: mediaType === 'video' ? 'Background Video' : 'Background Wallpaper',
         startSec: 0,
         endSec: effectiveDuration,
         startPct: 0,
         widthPct: 100,
         duration: effectiveDuration,
+        mediaType,
       });
     }
 
@@ -235,67 +482,138 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
     return clips;
   }, [backgroundConfig, centerLogoConfig, effectiveDuration]);
 
-  // Handle picked or dropped image files
-  const handleImageFilesSelected = (files: File[]) => {
-    const validFiles = files.filter((f) => f.type.startsWith('image/'));
-    if (validFiles.length === 0) return;
+  // Handle picked or dropped media files (supports photos, videos, and ZIP archives)
+  const handleImageFilesSelected = async (files: File[]) => {
+    if (!files || files.length === 0) return;
 
-    const newItems = validFiles.map((f) => ({
-      url: URL.createObjectURL(f),
-      name: f.name,
-    }));
+    let hasZip = files.some((f) => isZipFile(f));
+    if (!hasZip) {
+      for (const f of files) {
+        if (await isZipBlob(f)) {
+          hasZip = true;
+          break;
+        }
+      }
+    }
+    if (hasZip) {
+      setIsExtractingZip(true);
+      setZipProgress({ percent: 5, message: 'Membaca file arsip ZIP...' });
+    }
 
-    setImageFileStore((prev) => [...prev, ...newItems]);
-    const newUrls = newItems.map((item) => item.url);
+    try {
+      const { mediaFiles, imageFiles, videoFiles, zipCount } = await processFilesWithZipExtraction(files, (percent, message) => {
+        setZipProgress({ percent, message });
+      });
 
-    // If currently already multi_image slideshow mode:
-    if (backgroundConfig.type === 'multi_image') {
-      const current = backgroundConfig.multiImageUrls || [];
-      const updated = [...current, ...newUrls];
+      if (mediaFiles.length === 0) {
+        if (zipCount > 0) {
+          setStatusMessage('⚠️ File ZIP tidak berisi foto (JPG, PNG, WEBP) maupun video (MP4, WEBM, MOV) yang didukung.');
+        } else {
+          setStatusMessage('⚠️ Tidak ada file media (foto/video) yang valid.');
+        }
+        return;
+      }
 
-      if (subtitleConfig.lyrics && subtitleConfig.lyrics.length > 0) {
+      const totalPhotos = imageFiles.length;
+      const totalVideos = videoFiles.length;
+      const summaryText = totalVideos > 0 && totalPhotos > 0
+        ? `${mediaFiles.length} media (${totalPhotos} foto, ${totalVideos} video)`
+        : totalVideos > 0
+        ? `${totalVideos} video`
+        : `${totalPhotos} foto`;
+
+      const newItems = mediaFiles.map((f) => {
+        const url = URL.createObjectURL(f);
+        const mediaType: 'image' | 'video' = isVideoFile(f) ? 'video' : 'image';
+        registerMediaUrl(url, mediaType);
+        return {
+          url,
+          name: f.name,
+          mediaType,
+        };
+      });
+
+      setImageFileStore((prev) => [...prev, ...newItems]);
+      const newUrls = newItems.map((item) => item.url);
+      const hasTimestamp = newItems.some((i) => parseTimestampFromFilename(i.name, effectiveDuration) !== null);
+
+      // If currently already multi_image slideshow mode:
+      if (backgroundConfig.type === 'multi_image') {
+        const current = backgroundConfig.multiImageUrls || [];
+        const updated = [...current, ...newUrls];
         const allItems = [...imageFileStore, ...newItems];
-        const matched = heuristicMatchImagesToLyrics(allItems, subtitleConfig.lyrics, effectiveDuration);
+        const matched = heuristicMatchImagesToLyrics(allItems, subtitleConfig.lyrics || [], effectiveDuration);
+        const slidesWithMedia = matched.map((m) => {
+          const found = allItems.find((item) => item.url === m.slide.url);
+          return {
+            ...m.slide,
+            mediaType: found?.mediaType || getMediaUrlType(m.slide.url, m.slide.name),
+          };
+        });
         onBackgroundChange({
           ...backgroundConfig,
           multiImageUrls: updated,
-          multiImageSlides: matched.map((m) => m.slide),
+          multiImageSlides: slidesWithMedia,
         });
-        setStatusMessage(`✨ ${validFiles.length} foto ditambahkan & dicocokkan otomatis ke timestamp lirik lagu!`);
-      } else {
-        onBackgroundChange({
-          ...backgroundConfig,
-          multiImageUrls: updated,
-          multiImageInterval: backgroundConfig.multiImageInterval || 5,
+
+        setStatusMessage(
+          hasTimestamp
+            ? `⏱️ ${summaryText} disinkronkan tepat ke timestamp nama file!`
+            : zipCount > 0
+            ? `📦 Berhasil mengekstrak ${summaryText} dari ZIP & dicocokkan otomatis!`
+            : `✨ ${summaryText} ditambahkan & dicocokkan otomatis!`
+        );
+        setSelectedClip('image');
+      } else if (mediaFiles.length > 1 || zipCount > 0 || hasTimestamp) {
+        // Picked multiple media files, a ZIP, or media with timestamp: start slideshow immediately
+        const matched = heuristicMatchImagesToLyrics(newItems, subtitleConfig.lyrics || [], effectiveDuration);
+        const slidesWithMedia = matched.map((m) => {
+          const found = newItems.find((item) => item.url === m.slide.url);
+          return {
+            ...m.slide,
+            mediaType: found?.mediaType || getMediaUrlType(m.slide.url, m.slide.name),
+          };
         });
-        setStatusMessage(`📸 ${validFiles.length} foto berhasil ditambahkan ke slideshow background!`);
-      }
-      setSelectedClip('image');
-    } else if (validFiles.length > 1) {
-      // Picked multiple photos: start slideshow immediately
-      if (subtitleConfig.lyrics && subtitleConfig.lyrics.length > 0) {
-        const matched = heuristicMatchImagesToLyrics(newItems, subtitleConfig.lyrics, effectiveDuration);
         onBackgroundChange({
           ...backgroundConfig,
           type: 'multi_image',
           multiImageUrls: newUrls,
-          multiImageSlides: matched.map((m) => m.slide),
+          multiImageSlides: slidesWithMedia,
         });
-        setStatusMessage(`✨ Slideshow dibuat & nama foto otomatis dicocokkan ke lirik lagu!`);
+
+        setStatusMessage(
+          hasTimestamp
+            ? `⏱️ ${summaryText} disinkronkan tepat ke timestamp nama file!`
+            : zipCount > 0
+            ? `📦 ${summaryText} diekstrak dari ZIP & dicocokkan otomatis!`
+            : `✨ Slideshow dibuat & nama media dicocokkan otomatis!`
+        );
+        setSelectedClip('image');
       } else {
-        onBackgroundChange({
-          ...backgroundConfig,
-          type: 'multi_image',
-          multiImageUrls: newUrls,
-          multiImageInterval: Math.max(2, Math.round(effectiveDuration / newUrls.length)),
-        });
-        setStatusMessage(`🎞️ Slideshow background dibuat dengan ${validFiles.length} foto!`);
+        // 1 media and not slideshow
+        const singleItem = newItems[0];
+        if (singleItem?.mediaType === 'video') {
+          // Video: directly set as background
+          onBackgroundChange({
+            ...backgroundConfig,
+            type: 'custom_image',
+            customImageUrl: singleItem.url,
+          });
+          setStatusMessage(`🎥 Video background (${singleItem.name}) berhasil dipasang!`);
+          setSelectedClip('image');
+        } else {
+          // Photo: show choice modal
+          setPendingImageUrl(newUrls[0]);
+          setShowImageDialog(true);
+        }
       }
-      setSelectedClip('image');
-    } else {
-      // 1 photo and not slideshow: show choice modal
-      setPendingImageUrl(newUrls[0]);
-      setShowImageDialog(true);
+    } catch (err: any) {
+      console.error('Error processing files or zip:', err);
+      setStatusMessage(`❌ Gagal membaca file: ${err?.message || 'Terjadi kesalahan'}`);
+    } finally {
+      if (hasZip) {
+        setIsExtractingZip(false);
+      }
     }
   };
 
@@ -407,6 +725,56 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
     setStatusMessage(`⚡ Durasi disesuaikan pas dengan lagu: ${fitInterval}s / foto!`);
   };
 
+  const handleAutoFillGaps = () => {
+    const currentSlides = backgroundConfig.multiImageSlides || [];
+    const urls = backgroundConfig.multiImageUrls || [];
+    let allAvailableImages =
+      imageFileStore.length > 0
+        ? imageFileStore
+        : urls.map((u, i) => ({ url: u, name: `Foto ${i + 1}` }));
+    if (allAvailableImages.length === 0 && currentSlides.length > 0) {
+      allAvailableImages = currentSlides.map((s, i) => ({ url: s.url, name: s.name || `Foto ${i + 1}` }));
+    }
+    if (allAvailableImages.length === 0) {
+      setStatusMessage('⚠️ Tambahkan foto atau upload ZIP terlebih dahulu.');
+      return;
+    }
+
+    let slidesToProcess: SlideItem[] = currentSlides.length > 0 ? [...currentSlides] : [];
+    if (slidesToProcess.length === 0 && urls.length > 0) {
+      const interval = backgroundConfig.multiImageInterval || 5;
+      const total = Math.ceil(effectiveDuration / interval);
+      for (let i = 0; i < total; i++) {
+        const start = i * interval;
+        const end = Math.min(effectiveDuration, (i + 1) * interval);
+        slidesToProcess.push({
+          id: `slide-auto-${i}-${Date.now()}`,
+          url: urls[i % urls.length],
+          name: `Foto ${(i % urls.length) + 1}`,
+          startSec: start,
+          endSec: end,
+        });
+      }
+    }
+
+    if (slidesToProcess.length === 0) {
+      setStatusMessage('⚠️ Belum ada slide foto untuk diproses jedanya.');
+      return;
+    }
+
+    const filledSlides = fillTimelineSlideGaps(slidesToProcess, allAvailableImages, effectiveDuration, {
+      maxGapSec: 7.0,
+      slideIntervalSec: 4.5,
+    });
+
+    onBackgroundChange({
+      ...backgroundConfig,
+      type: 'multi_image',
+      multiImageSlides: filledSlides,
+    });
+    setStatusMessage(`✨ Berhasil mengisi jeda musik dengan ${filledSlides.length} foto bergantian dinamis!`);
+  };
+
   const handleSetImageAsBackground = (url: string) => {
     onBackgroundChange({
       ...backgroundConfig,
@@ -458,6 +826,91 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
       onCenterLogoChange({ ...centerLogoConfig, imageUrl: '' });
       setStatusMessage('🗑️ Logo tengah dihapus.');
     }
+  };
+
+  // --- Targeted Frame Visual Effects (Distorsi, Kamera Jadul, Cacing-cacing) ---
+  const handleSetSlideVisualEffect = (
+    slideIdOrIndex: string | number,
+    effect: VisualEffectType,
+    intensity: number = 0.75
+  ) => {
+    let slides = backgroundConfig.multiImageSlides ? [...backgroundConfig.multiImageSlides] : [];
+
+    // If multiImageSlides is empty but multiImageUrls exists, materialize slides first
+    if (slides.length === 0 && backgroundConfig.multiImageUrls && backgroundConfig.multiImageUrls.length > 0) {
+      const urls = backgroundConfig.multiImageUrls;
+      const interval = backgroundConfig.multiImageInterval || 5;
+      const total = Math.ceil(effectiveDuration / interval);
+      for (let i = 0; i < total; i++) {
+        const start = i * interval;
+        const end = Math.min(effectiveDuration, (i + 1) * interval);
+        slides.push({
+          id: `slide-auto-${i}-${Date.now()}`,
+          url: urls[i % urls.length],
+          name: `Foto ${(i % urls.length) + 1}`,
+          startSec: start,
+          endSec: end,
+          visualEffect: 'none',
+        });
+      }
+    }
+
+    let targetIndex = -1;
+    if (typeof slideIdOrIndex === 'number') {
+      targetIndex = slideIdOrIndex;
+    } else {
+      targetIndex = slides.findIndex((s, idx) => s.id === slideIdOrIndex || `slide-${idx}` === slideIdOrIndex);
+    }
+
+    if (targetIndex >= 0 && targetIndex < slides.length) {
+      slides[targetIndex] = {
+        ...slides[targetIndex],
+        visualEffect: effect,
+        visualEffectIntensity: intensity,
+      };
+
+      onBackgroundChange({
+        ...backgroundConfig,
+        type: 'multi_image',
+        multiImageSlides: slides,
+      });
+
+      const opt = VISUAL_EFFECT_OPTIONS.find((o) => o.id === effect);
+      setStatusMessage(
+        effect === 'none'
+          ? `⚪ Efek visual slide #${targetIndex + 1} dinonaktifkan.`
+          : `✨ Efek ${opt?.shortLabel || effect} aktif pada slide #${targetIndex + 1} (${formatSec(slides[targetIndex].startSec)} - ${formatSec(slides[targetIndex].endSec)})!`
+      );
+    }
+  };
+
+  const handleAddTimelineFxAtPlayhead = (effect: VisualEffectType) => {
+    const cur = Number(currentTime.toFixed(2));
+    const end = Math.min(effectiveDuration, Number((cur + 3.0).toFixed(2)));
+    const existing = backgroundConfig.timelineFxClips || [];
+    const newFx: TimelineFxClip = {
+      id: `fx-${Date.now()}`,
+      name: `Efek ${formatSec(cur)}`,
+      startSec: cur,
+      endSec: end,
+      effect,
+      intensity: 0.8,
+    };
+    onBackgroundChange({
+      ...backgroundConfig,
+      timelineFxClips: [...existing, newFx],
+    });
+    const opt = VISUAL_EFFECT_OPTIONS.find((o) => o.id === effect);
+    setStatusMessage(`✨ Efek ${opt?.shortLabel || effect} ditambahkan (${formatSec(cur)} - ${formatSec(end)})!`);
+  };
+
+  const handleRemoveTimelineFx = (fxId: string) => {
+    const existing = backgroundConfig.timelineFxClips || [];
+    onBackgroundChange({
+      ...backgroundConfig,
+      timelineFxClips: existing.filter((f) => f.id !== fxId),
+    });
+    setStatusMessage('🗑️ Efek timeline dihapus.');
   };
 
   // Sync volume & loop with audioEngine
@@ -552,17 +1005,51 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
     [effectiveDuration]
   );
 
+  // Map timeline coordinate to source audio file position for seeking
+  const seekTimeline = useCallback(
+    (timelineSec: number) => {
+      if (audioClips.length === 0) {
+        globalAudioEngine.seek(timelineSec);
+        return;
+      }
+      const sorted = [...audioClips].sort((a, b) => a.start - b.start);
+      const clip = sorted.find((c) => timelineSec >= c.start && timelineSec <= c.end);
+      if (clip) {
+        const offset = Math.max(0, timelineSec - clip.start);
+        const sourceSec = (clip.sourceStart ?? clip.start) + offset;
+        globalAudioEngine.seek(sourceSec);
+      } else {
+        const nextClip = sorted.find((c) => c.start >= timelineSec);
+        if (nextClip) {
+          globalAudioEngine.seek(nextClip.sourceStart ?? nextClip.start);
+        } else if (sorted.length > 0) {
+          globalAudioEngine.seek(sorted[0].sourceStart ?? sorted[0].start);
+        } else {
+          globalAudioEngine.seek(timelineSec);
+        }
+      }
+    },
+    [audioClips]
+  );
+
   // Seek handler from clicking or dragging timeline
   const handleTimelineMouseDown = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('.trim-handle')) return;
+    if (
+      (e.target as HTMLElement).closest('.trim-handle') ||
+      (e.target as HTMLElement).closest('.audio-clip-element') ||
+      (e.target as HTMLElement).closest('.timeline-gap-element') ||
+      (e.target as HTMLElement).closest('.audio-trim-handle')
+    )
+      return;
+
     isDraggingPlayheadRef.current = true;
     const targetSec = getSecondsFromMouseEvent(e.clientX);
-    globalAudioEngine.seek(targetSec);
+    seekTimeline(targetSec);
 
     const onMouseMove = (moveEvent: MouseEvent) => {
       if (!isDraggingPlayheadRef.current) return;
       const sec = getSecondsFromMouseEvent(moveEvent.clientX);
-      globalAudioEngine.seek(sec);
+      seekTimeline(sec);
     };
 
     const onMouseUp = () => {
@@ -614,51 +1101,627 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
 
   // --- CapCut Split Tool (Bagi pada Jarum) ---
   const handleSplitAtPlayhead = () => {
-    const cur = currentTime;
-    if (cur <= 1 || cur >= effectiveDuration - 1) {
-      setStatusMessage('Pindahkan jarum penunjuk ke tengah audio untuk memotong.');
+    const cur = Number(currentTime.toFixed(2));
+    if (cur <= 0.5 || cur >= effectiveDuration - 0.5) {
+      setStatusMessage('⚠️ Pindahkan jarum penunjuk ke tengah audio/slide untuk memotong.');
       return;
     }
 
-    // Set trim range from playhead or split to end
-    if (!trimRange) {
-      const newRange = { start: Math.max(0, cur - 15), end: Math.min(effectiveDuration, cur + 30) };
-      setTrimRange(newRange);
-      globalAudioEngine.setTrimRange(newRange);
-      setStatusMessage(`✂️ Split aktif: Rentang potongan diset ${formatSec(newRange.start)} - ${formatSec(newRange.end)}`);
-    } else {
-      // If playhead is inside trim range, adjust nearest border
-      const distToStart = Math.abs(cur - trimRange.start);
-      const distToEnd = Math.abs(cur - trimRange.end);
-      let newRange;
-      if (distToStart < distToEnd) {
-        newRange = { start: cur, end: trimRange.end };
-      } else {
-        newRange = { start: trimRange.start, end: cur };
+    // 1. Check if B-Roll clip is targeted for split
+    const isBRollTarget = selectedClip === 'broll' || selectedBRollId !== null;
+    const bRollClips = backgroundConfig.bRoll?.clips || [];
+    if (isBRollTarget && bRollClips.length > 0) {
+      const bIdx = bRollClips.findIndex((b) => cur > b.startSec + 0.2 && cur < b.endSec - 0.2);
+      if (bIdx !== -1) {
+        const targetB = bRollClips[bIdx];
+        const clipA: BRollClip = {
+          ...targetB,
+          id: `broll-${Date.now()}-1`,
+          endSec: cur,
+        };
+        const clipB: BRollClip = {
+          ...targetB,
+          id: `broll-${Date.now()}-2`,
+          startSec: cur,
+          name: `${targetB.name} (B)`,
+        };
+        const updated = [...bRollClips];
+        updated.splice(bIdx, 1, clipA, clipB);
+        onBackgroundChange({
+          ...backgroundConfig,
+          bRoll: {
+            ...backgroundConfig.bRoll,
+            enabled: true,
+            clips: updated,
+          },
+        });
+        setSelectedBRollId(clipB.id);
+        setSelectedClip('broll');
+        setStatusMessage(`✂️ Klip B-Roll #${bIdx + 1} berhasil dibagi 2 di ${formatSec(cur)}!`);
+        return;
       }
-      setTrimRange(newRange);
-      globalAudioEngine.setTrimRange(newRange);
-      setStatusMessage(`✂️ Potongan disesuaikan ke posisi jarum: ${formatSec(cur)}`);
     }
+
+    const isImageTarget = selectedClip === 'image' || selectedImageId !== null;
+    const currentSlides = backgroundConfig.multiImageSlides || [];
+    const urls = backgroundConfig.multiImageUrls || [];
+
+    if (isImageTarget && (currentSlides.length > 0 || urls.length > 0)) {
+      // Materialize slides if uniform interval
+      let slides = currentSlides.length > 0 ? [...currentSlides] : [];
+      if (slides.length === 0 && urls.length > 0) {
+        const interval = backgroundConfig.multiImageInterval || 5;
+        const total = Math.ceil(effectiveDuration / interval);
+        for (let i = 0; i < total; i++) {
+          const start = i * interval;
+          const end = Math.min(effectiveDuration, (i + 1) * interval);
+          slides.push({
+            id: `slide-auto-${i}-${Date.now()}`,
+            url: urls[i % urls.length],
+            name: `Foto ${(i % urls.length) + 1}`,
+            startSec: start,
+            endSec: end,
+          });
+        }
+      }
+
+      const slideIdx = slides.findIndex((s) => cur > s.startSec + 0.2 && cur < s.endSec - 0.2);
+      if (slideIdx !== -1) {
+        const targetSlide = slides[slideIdx];
+        const slideA: SlideItem = {
+          ...targetSlide,
+          id: `slide-${Date.now()}-1`,
+          endSec: cur,
+        };
+        const slideB: SlideItem = {
+          ...targetSlide,
+          id: `slide-${Date.now()}-2`,
+          startSec: cur,
+          name: `${targetSlide.name || 'Foto'} (B)`,
+        };
+
+        const updatedSlides = [...slides];
+        updatedSlides.splice(slideIdx, 1, slideA, slideB);
+        onBackgroundChange({
+          ...backgroundConfig,
+          type: 'multi_image',
+          multiImageSlides: updatedSlides,
+        });
+        setSelectedImageId(slideB.id || null);
+        setSelectedClip('image');
+        setStatusMessage(`✂️ Slide foto #${slideIdx + 1} berhasil dibagi 2 di ${formatSec(cur)}!`);
+        return;
+      }
+    }
+
+    // Find which clip contains cur
+    const targetIdx = audioClips.findIndex(
+      (c) => cur > c.start + 0.3 && cur < c.end - 0.3
+    );
+
+    if (targetIdx === -1) {
+      if (isImageTarget && (currentSlides.length > 0 || urls.length > 0)) {
+        setStatusMessage(`⚠️ Arahkan jarum ke dalam slide foto untuk membagi slide (posisi saat ini: ${formatSec(cur)}).`);
+      } else {
+        setStatusMessage(`⚠️ Arahkan jarum ke dalam klip audio untuk memotong (posisi saat ini: ${formatSec(cur)}).`);
+      }
+      return;
+    }
+
+    const targetClip = audioClips[targetIdx];
+    const sStart = targetClip.sourceStart ?? targetClip.start;
+    const sEnd = targetClip.sourceEnd ?? targetClip.end;
+    const splitRatio = (cur - targetClip.start) / Math.max(0.01, targetClip.end - targetClip.start);
+    const sourceSplit = Number((sStart + splitRatio * (sEnd - sStart)).toFixed(2));
+
+    const newClipA = {
+      id: `audio-clip-${Date.now()}-1`,
+      start: targetClip.start,
+      end: cur,
+      sourceStart: sStart,
+      sourceEnd: sourceSplit,
+      name: `Trek ${targetIdx + 1}A`,
+    };
+    const newClipB = {
+      id: `audio-clip-${Date.now()}-2`,
+      start: cur,
+      end: targetClip.end,
+      sourceStart: sourceSplit,
+      sourceEnd: sEnd,
+      name: `Trek ${targetIdx + 1}B`,
+    };
+
+    const copy = [...audioClips];
+    copy.splice(targetIdx, 1, newClipA, newClipB);
+    const renamed = copy.map((c, idx) => ({ ...c, name: `Trek ${idx + 1}` }));
+
+    setAudioClips(renamed);
+    setSelectedAudioClipId(newClipB.id);
+    setSelectedClip('audio');
+    setStatusMessage(`✂️ Audio berhasil dibagi 2 di ${formatSec(cur)}! Klik & geser klip atau hapus bagian yang tak diinginkan.`);
+  };
+
+  // --- B-Roll Clip Management Handlers ---
+  const handleDeleteBRollClip = (clipId: string) => {
+    const current = backgroundConfig.bRoll?.clips || [];
+    const updated = current.filter((c) => c.id !== clipId);
+    onBackgroundChange({
+      ...backgroundConfig,
+      bRoll: {
+        ...backgroundConfig.bRoll,
+        enabled: true,
+        clips: updated,
+      },
+    });
+    if (selectedBRollId === clipId) setSelectedBRollId(null);
+    setStatusMessage('🗑️ Klip B-Roll dihapus dari timeline.');
+  };
+
+  const handleSplitBRollClip = (clipId: string) => {
+    const current = backgroundConfig.bRoll?.clips || [];
+    const bIdx = current.findIndex((c) => c.id === clipId);
+    if (bIdx === -1) return;
+    const targetB = current[bIdx];
+    const cur = Number(currentTime.toFixed(2));
+    if (cur <= targetB.startSec + 0.2 || cur >= targetB.endSec - 0.2) {
+      setStatusMessage(`⚠️ Arahkan playhead ke dalam durasi klip (${formatSec(targetB.startSec)} - ${formatSec(targetB.endSec)}) untuk membagi.`);
+      return;
+    }
+    const clipA: BRollClip = { ...targetB, id: `broll-${Date.now()}-1`, endSec: cur };
+    const clipB: BRollClip = { ...targetB, id: `broll-${Date.now()}-2`, startSec: cur, name: `${targetB.name} (B)` };
+    const updated = [...current];
+    updated.splice(bIdx, 1, clipA, clipB);
+    onBackgroundChange({
+      ...backgroundConfig,
+      bRoll: {
+        ...backgroundConfig.bRoll,
+        enabled: true,
+        clips: updated,
+      },
+    });
+    setSelectedBRollId(clipB.id);
+    setSelectedClip('broll');
+    setStatusMessage(`✂️ Klip B-roll berhasil dibagi 2 di ${formatSec(cur)}!`);
+  };
+
+  const handleCycleBRollMode = (clipId: string) => {
+    const current = backgroundConfig.bRoll?.clips || [];
+    const cycle: BRollDisplayMode[] = ['cutaway', 'pip', 'split_screen', 'blend_overlay'];
+    const updated = current.map((c) => {
+      if (c.id === clipId) {
+        const nextIdx = (cycle.indexOf(c.displayMode || 'cutaway') + 1) % cycle.length;
+        return { ...c, displayMode: cycle[nextIdx] };
+      }
+      return c;
+    });
+    onBackgroundChange({
+      ...backgroundConfig,
+      bRoll: {
+        ...backgroundConfig.bRoll,
+        enabled: true,
+        clips: updated,
+      },
+    });
+  };
+
+  // Hapus Klip Audio Terpilih (Delete Clip Ala CapCut)
+  const handleDeleteAudioClip = (clipId: string) => {
+    if (audioClips.length <= 1) {
+      setStatusMessage('Tidak bisa menghapus satu-satunya klip. Gunakan tombol Reset untuk kembali ke awal.');
+      return;
+    }
+    const updated = audioClips.filter((c) => c.id !== clipId);
+    const renamed = updated.map((c, idx) => ({ ...c, name: `Trek ${idx + 1}` }));
+    setAudioClips(renamed);
+    setSelectedAudioClipId(renamed[0]?.id || null);
+    const remainingSec = renamed.reduce((sum, c) => sum + (c.end - c.start), 0);
+    setStatusMessage(`🗑️ 1 klip audio dihapus. Sisa durasi: ${remainingSec.toFixed(1)}s. Klik "Tutup Ruang Kosong" jika ingin merapatkan klip.`);
+  };
+
+  // Hapus Ruang Kosong Tertentu (Tutup Gap Antar Klip / Awal)
+  const handleDeleteGap = (gap: { start: number; end: number; duration: number; isBeforeFirst: boolean }) => {
+    const shift = gap.duration;
+    let newFirstClipStart = 0;
+    setAudioClips((prev) => {
+      const sorted = [...prev].sort((a, b) => a.start - b.start);
+      const updated = sorted.map((c) => {
+        if (c.start >= gap.start - 0.05) {
+          const newStart = Math.max(0, Number((c.start - shift).toFixed(2)));
+          const dur = c.end - c.start;
+          const newEnd = Number((newStart + dur).toFixed(2));
+          return {
+            ...c,
+            start: newStart,
+            end: newEnd,
+            sourceStart: c.sourceStart ?? c.start,
+            sourceEnd: c.sourceEnd ?? c.end,
+          };
+        }
+        return c;
+      });
+      if (updated.length > 0) {
+        newFirstClipStart = updated[0].sourceStart ?? updated[0].start;
+      }
+      return updated;
+    });
+    globalAudioEngine.seek(newFirstClipStart);
+    setStatusMessage(`⚡ Ruang kosong (${gap.duration.toFixed(1)}s) berhasil dihapus! Klip audio otomatis dirapatkan.`);
+  };
+
+  // Hapus Semua Ruang Kosong (Tutup Semua Gap / Ripple Delete All)
+  const handleCloseAllGaps = () => {
+    if (audioClips.length === 0) return;
+    let newFirstClipStart = 0;
+    setAudioClips((prev) => {
+      const sorted = [...prev].sort((a, b) => a.start - b.start);
+      let cur = 0;
+      const updated = sorted.map((c, idx) => {
+        const dur = Math.max(0.2, c.end - c.start);
+        const sStart = c.sourceStart ?? c.start;
+        const sEnd = c.sourceEnd ?? (sStart + dur);
+        const newClip = {
+          ...c,
+          start: Number(cur.toFixed(2)),
+          end: Number((cur + dur).toFixed(2)),
+          sourceStart: sStart,
+          sourceEnd: sEnd,
+          name: `Trek ${idx + 1}`,
+        };
+        cur += dur;
+        return newClip;
+      });
+      if (updated.length > 0) {
+        newFirstClipStart = updated[0].sourceStart ?? updated[0].start;
+      }
+      return updated;
+    });
+    globalAudioEngine.seek(newFirstClipStart);
+    setStatusMessage(`⚡ Semua ruang kosong (${audioGaps.length} gap) berhasil dihapus! Semua klip tersambung rapat.`);
+  };
+
+  // Geser Klip Audio (Nudge Left / Right)
+  const handleShiftClip = (clipId: string, deltaSec: number) => {
+    setAudioClips((prev) => {
+      return prev.map((c) => {
+        if (c.id !== clipId) return c;
+        const dur = c.end - c.start;
+        let newStart = Math.max(0, c.start + deltaSec);
+        let newEnd = newStart + dur;
+        if (newEnd > effectiveDuration) {
+          newEnd = effectiveDuration;
+          newStart = Math.max(0, newEnd - dur);
+        }
+        return {
+          ...c,
+          start: Number(newStart.toFixed(2)),
+          end: Number(newEnd.toFixed(2)),
+        };
+      });
+    });
+    setStatusMessage(`↔️ Klip digeser ${deltaSec > 0 ? `+${deltaSec}s` : `${deltaSec}s`}.`);
+  };
+
+  // Rapatkan Klip Terpilih ke Kiri (Menghapus ruang kosong di sebelah kiri klip)
+  const handleSnapClipToLeft = (clipId: string) => {
+    setAudioClips((prev) => {
+      const sorted = [...prev].sort((a, b) => a.start - b.start);
+      const idx = sorted.findIndex((c) => c.id === clipId);
+      if (idx === -1) return prev;
+      const targetClip = sorted[idx];
+      const dur = targetClip.end - targetClip.start;
+      const prevClip = idx > 0 ? sorted[idx - 1] : null;
+      const newStart = prevClip ? prevClip.end : 0;
+      const newEnd = Number((newStart + dur).toFixed(2));
+      return sorted.map((c) =>
+        c.id === clipId ? { ...c, start: newStart, end: newEnd } : c
+      );
+    });
+    setStatusMessage(`⏮ Klip berhasil dirapatkan ke kiri.`);
+  };
+
+  // Check if any clip is currently selected on timeline
+  const hasSelectedClip = useMemo(() => {
+    return Boolean(
+      selectedBRollId ||
+      selectedImageId ||
+      (selectedAudioClipId && audioClips.length > 1)
+    );
+  }, [selectedBRollId, selectedImageId, selectedAudioClipId, audioClips.length]);
+
+  // Selected clip deletion logic (B-Roll, Media Slideshow, Audio Clip)
+  const handleDeleteSelectedClip = useCallback(() => {
+    // 1. If B-Roll clip is selected
+    if (selectedBRollId) {
+      handleDeleteBRollClip(selectedBRollId);
+      return;
+    }
+
+    // 2. If Media / Image clip is selected
+    if (selectedImageId) {
+      const targetClip = imageClips.find((c) => c.id === selectedImageId);
+      if (targetClip) {
+        handleRemoveImageClip(targetClip);
+        setSelectedImageId(null);
+        return;
+      }
+    }
+
+    // 3. If Audio clip is selected
+    if (selectedAudioClipId) {
+      if (audioClips.length > 1) {
+        handleDeleteAudioClip(selectedAudioClipId);
+        return;
+      } else {
+        setStatusMessage('⚠️ Tidak bisa menghapus satu-satunya klip audio utama.');
+        return;
+      }
+    }
+
+    // 4. Fallback if user clicked a track category and playhead is on a clip
+    if (selectedClip === 'broll') {
+      const bRollClips = backgroundConfig.bRoll?.clips || [];
+      const currentAtPlayhead = bRollClips.find(
+        (c) => currentTime >= c.startSec && currentTime <= c.endSec
+      );
+      if (currentAtPlayhead) {
+        handleDeleteBRollClip(currentAtPlayhead.id);
+        return;
+      }
+    }
+
+    if (selectedClip === 'image' && imageClips.length > 0) {
+      const currentAtPlayhead = imageClips.find(
+        (c) => currentTime >= c.startSec && currentTime <= c.endSec
+      );
+      if (currentAtPlayhead) {
+        handleRemoveImageClip(currentAtPlayhead);
+        return;
+      }
+    }
+
+    setStatusMessage('ℹ️ Pilih klip B-roll, media foto/video, atau potongan audio terlebih dahulu untuk dihapus.');
+  }, [
+    selectedBRollId,
+    selectedImageId,
+    selectedAudioClipId,
+    selectedClip,
+    imageClips,
+    audioClips,
+    backgroundConfig.bRoll?.clips,
+    currentTime,
+  ]);
+
+  // Global Keyboard listener for Delete / Backspace key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeEl = document.activeElement;
+      const isTyping =
+        activeEl instanceof HTMLInputElement ||
+        activeEl instanceof HTMLTextAreaElement ||
+        (activeEl as HTMLElement)?.isContentEditable;
+
+      if (isTyping) return;
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const hasSelection = Boolean(
+          selectedBRollId ||
+          selectedImageId ||
+          (selectedAudioClipId && audioClips.length > 1)
+        );
+
+        if (hasSelection) {
+          e.preventDefault();
+          handleDeleteSelectedClip();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleDeleteSelectedClip, selectedBRollId, selectedImageId, selectedAudioClipId, audioClips.length]);
+
+  // Track Visibility Helpers
+  const toggleTrackVisibility = useCallback((trackKey: 'audio' | 'media' | 'broll' | 'subtitle') => {
+    setTrackVisibility((prev) => {
+      const updated = { ...prev, [trackKey]: !prev[trackKey] };
+      try {
+        localStorage.setItem('capcut_timeline_track_visibility', JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+      return updated;
+    });
+  }, []);
+
+  const showAllTracks = useCallback(() => {
+    const allOn = { audio: true, media: true, broll: true, subtitle: true };
+    setTrackVisibility(allOn);
+    try {
+      localStorage.setItem('capcut_timeline_track_visibility', JSON.stringify(allOn));
+    } catch {
+      // ignore
+    }
+    setStatusMessage('👁️ Semua baris trek ditampilkan.');
+  }, []);
+
+  const hiddenTracksCount = useMemo(() => {
+    let count = 0;
+    if (!trackVisibility.audio) count++;
+    if (!trackVisibility.media) count++;
+    if (!trackVisibility.broll) count++;
+    if (!trackVisibility.subtitle) count++;
+    return count;
+  }, [trackVisibility]);
+
+  // Dragging & Sliding Audio Clip (Geser Klip Bebas Horizontal & Trim Tepi)
+  const handleAudioClipMouseDown = (
+    e: React.MouseEvent,
+    clip: { id: string; start: number; end: number; name: string; sourceStart?: number; sourceEnd?: number },
+    edge: 'body' | 'left' | 'right' = 'body'
+  ) => {
+    e.stopPropagation();
+    setSelectedClip('audio');
+    setSelectedAudioClipId(clip.id);
+
+    dragAudioRef.current = {
+      startX: e.clientX,
+      origStart: clip.start,
+      origEnd: clip.end,
+      clipDuration: clip.end - clip.start,
+      clipId: clip.id,
+      edge,
+    };
+    setDraggingAudioClipId(clip.id);
+    setDraggingAudioEdge(edge === 'body' ? null : edge);
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      if (!dragAudioRef.current || !timelineContainerRef.current) return;
+      const totalWidth = timelineContainerRef.current.clientWidth;
+      if (totalWidth <= 0) return;
+
+      const deltaX = moveEvent.clientX - dragAudioRef.current.startX;
+      const deltaSec = (deltaX / totalWidth) * effectiveDuration;
+      const { origStart, origEnd, clipDuration, clipId, edge: currentEdge } = dragAudioRef.current;
+
+      setAudioClips((prev) => {
+        return prev.map((c) => {
+          if (c.id !== clipId) return c;
+
+          if (currentEdge === 'body') {
+            let newStart = origStart + deltaSec;
+            let newEnd = newStart + clipDuration;
+
+            // Clamping
+            if (newStart < 0) {
+              newStart = 0;
+              newEnd = clipDuration;
+            }
+            if (newEnd > effectiveDuration) {
+              newEnd = effectiveDuration;
+              newStart = Math.max(0, effectiveDuration - clipDuration);
+            }
+
+            // Magnetic snap to 0
+            if (newStart < 0.35) {
+              newStart = 0;
+              newEnd = clipDuration;
+            }
+
+            // Magnetic snap to other clips
+            const otherClips = prev.filter((o) => o.id !== clipId);
+            for (const other of otherClips) {
+              if (Math.abs(newStart - other.end) < 0.4) {
+                newStart = other.end;
+                newEnd = newStart + clipDuration;
+                break;
+              }
+              if (Math.abs(newEnd - other.start) < 0.4) {
+                newEnd = other.start;
+                newStart = Math.max(0, newEnd - clipDuration);
+                break;
+              }
+            }
+
+            return {
+              ...c,
+              start: Number(newStart.toFixed(2)),
+              end: Number(newEnd.toFixed(2)),
+            };
+          } else if (currentEdge === 'left') {
+            let newStart = origStart + deltaSec;
+            newStart = Math.max(0, Math.min(origEnd - 0.3, newStart));
+
+            if (newStart < 0.35) newStart = 0;
+            const otherClips = prev.filter((o) => o.id !== clipId);
+            for (const other of otherClips) {
+              if (Math.abs(newStart - other.end) < 0.4) {
+                newStart = other.end;
+                break;
+              }
+            }
+
+            const srcStart = c.sourceStart ?? origStart;
+            const deltaSrc = newStart - origStart;
+            return {
+              ...c,
+              start: Number(newStart.toFixed(2)),
+              sourceStart: Number((srcStart + deltaSrc).toFixed(2)),
+            };
+          } else if (currentEdge === 'right') {
+            let newEnd = origEnd + deltaSec;
+            newEnd = Math.min(effectiveDuration, Math.max(origStart + 0.3, newEnd));
+
+            if (Math.abs(newEnd - effectiveDuration) < 0.35) newEnd = effectiveDuration;
+            const otherClips = prev.filter((o) => o.id !== clipId);
+            for (const other of otherClips) {
+              if (Math.abs(newEnd - other.start) < 0.4) {
+                newEnd = other.start;
+                break;
+              }
+            }
+
+            const srcEnd = c.sourceEnd ?? origEnd;
+            const deltaSrc = newEnd - origEnd;
+            return {
+              ...c,
+              end: Number(newEnd.toFixed(2)),
+              sourceEnd: Number((srcEnd + deltaSrc).toFixed(2)),
+            };
+          }
+          return c;
+        });
+      });
+    };
+
+    const onMouseUp = () => {
+      setDraggingAudioClipId(null);
+      setDraggingAudioEdge(null);
+      dragAudioRef.current = null;
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+
+      setAudioClips((prev) => [...prev].sort((a, b) => a.start - b.start));
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
   };
 
   // Potong Awal (Hapus sebelum jarum, simpan dari jarum ke akhir)
   const handleTrimBeforePlayhead = () => {
-    const cur = currentTime;
+    const cur = Number(currentTime.toFixed(2));
     if (cur <= 0.5) return;
-    const newRange = { start: cur, end: effectiveDuration };
-    setTrimRange(newRange);
-    globalAudioEngine.setTrimRange(newRange);
+    const newClip = {
+      id: `clip-${Date.now()}`,
+      start: cur,
+      end: effectiveDuration,
+      sourceStart: cur,
+      sourceEnd: effectiveDuration,
+      name: 'Trek 1',
+    };
+    setAudioClips([newClip]);
+    setSelectedAudioClipId(newClip.id);
+    setTrimRange({ start: cur, end: effectiveDuration });
+    globalAudioEngine.setTrimRange({ start: cur, end: effectiveDuration });
     setStatusMessage(`✂️ Potong awal: simpan dari ${formatSec(cur)} hingga selesai.`);
   };
 
   // Potong Akhir (Hapus setelah jarum, simpan awal hingga jarum)
   const handleTrimAfterPlayhead = () => {
-    const cur = currentTime;
+    const cur = Number(currentTime.toFixed(2));
     if (cur >= effectiveDuration - 0.5) return;
-    const newRange = { start: 0, end: cur };
-    setTrimRange(newRange);
-    globalAudioEngine.setTrimRange(newRange);
+    const newClip = {
+      id: `clip-${Date.now()}`,
+      start: 0,
+      end: cur,
+      sourceStart: 0,
+      sourceEnd: cur,
+      name: 'Trek 1',
+    };
+    setAudioClips([newClip]);
+    setSelectedAudioClipId(newClip.id);
+    setTrimRange({ start: 0, end: cur });
+    globalAudioEngine.setTrimRange({ start: 0, end: cur });
     setStatusMessage(`✂️ Potong akhir: simpan dari awal hingga ${formatSec(cur)}.`);
   };
 
@@ -679,6 +1742,8 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
         const end = Math.min(effectiveDuration, Math.ceil(dropSection.end));
         const newRange = { start, end };
         setTrimRange(newRange);
+        setAudioClips([{ id: 'clip-reff', start, end, sourceStart: start, sourceEnd: end, name: 'Reff (AI)' }]);
+        setSelectedAudioClipId('clip-reff');
         globalAudioEngine.setTrimRange(newRange);
         globalAudioEngine.seek(start);
         setStatusMessage(`🔥 AI mendeteksi ${dropSection.name} (${formatSec(start)} - ${formatSec(end)})`);
@@ -688,26 +1753,32 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
 
     // Fallback: take middle 40 seconds
     const mid = effectiveDuration / 2;
-    const newRange = {
-      start: Math.max(0, Math.floor(mid - 15)),
-      end: Math.min(effectiveDuration, Math.floor(mid + 25)),
-    };
+    const s = Math.max(0, Math.floor(mid - 15));
+    const e = Math.min(effectiveDuration, Math.floor(mid + 25));
+    const newRange = { start: s, end: e };
     setTrimRange(newRange);
+    setAudioClips([{ id: 'clip-reff', start: s, end: e, sourceStart: s, sourceEnd: e, name: 'Trek Tengah' }]);
+    setSelectedAudioClipId('clip-reff');
     globalAudioEngine.setTrimRange(newRange);
-    globalAudioEngine.seek(newRange.start);
-    setStatusMessage(`🔥 Bagian tengah lagu dipilih (${formatSec(newRange.start)} - ${formatSec(newRange.end)})`);
+    globalAudioEngine.seek(s);
+    setStatusMessage(`🔥 Bagian tengah lagu dipilih (${formatSec(s)} - ${formatSec(e)})`);
   };
 
   // Reset Trim
   const handleResetTrim = () => {
+    setAudioClips([
+      { id: 'clip-1', start: 0, end: effectiveDuration, sourceStart: 0, sourceEnd: effectiveDuration, name: 'Trek 1' },
+    ]);
+    setSelectedAudioClipId('clip-1');
     setTrimRange(null);
     globalAudioEngine.setTrimRange(null);
-    setStatusMessage('🔄 Rentang potongan di-reset ke lagu penuh.');
+    globalAudioEngine.setActiveSegments(null);
+    setStatusMessage('↺ Rentang potongan di-reset ke lagu penuh.');
   };
 
   // Commit and apply cut permanently to visualizer
   const handleApplyTrimPermanently = async () => {
-    if (!trimRange) {
+    if (!isAudioClipsModified && !trimRange) {
       setStatusMessage('Belum ada bagian audio yang dipotong.');
       return;
     }
@@ -716,19 +1787,36 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
       setIsApplyingTrim(true);
       const audioBlob = await AudioTrimmerJoiner.getTrackAudioBlob(currentTrack);
 
-      const cutTitle = `${currentTrack.title}_Cut_${Math.round(trimRange.start)}-${Math.round(trimRange.end)}s.wav`;
-      const trimResult = await AudioTrimmerJoiner.trimAudioFile(
+      const sortedClips = [...audioClips].sort((a, b) => a.start - b.start);
+      const segments =
+        trimRange
+          ? [{ start: trimRange.start, end: trimRange.end }]
+          : sortedClips.map((c) => ({
+              start: c.sourceStart ?? c.start,
+              end: c.sourceEnd ?? c.end,
+            }));
+
+      const totalDur = segments.reduce((sum, s) => sum + Math.max(0, s.end - s.start), 0);
+      const cutTitle = `${currentTrack.title}_Cut_${Math.round(totalDur)}s.wav`;
+
+      const trimResult = await AudioTrimmerJoiner.sliceAndJoinSegments(
         audioBlob,
-        trimRange.start,
-        trimRange.end,
-        cutTitle
+        segments,
+        cutTitle,
+        { format: 'wav' }
       );
 
       // Synchronously slice subtitle timestamps so they remain 100% matched to the cut audio
-      const adjustedLyrics = sliceLyrics(subtitleConfig.lyrics, trimRange.start, trimRange.end);
+      const adjustedLyrics = sliceLyricsMultiSegments(subtitleConfig.lyrics, segments);
 
       setTrimRange(null);
       globalAudioEngine.setTrimRange(null);
+      globalAudioEngine.setActiveSegments(null);
+      setAudioClips([
+        { id: 'clip-1', start: 0, end: trimResult.duration, name: 'Trek 1', sourceStart: 0, sourceEnd: trimResult.duration },
+      ]);
+      setSelectedAudioClipId('clip-1');
+
       await onTrackChanged(trimResult.file, adjustedLyrics);
       setStatusMessage(`✅ Potongan (${Math.round(trimResult.duration)}s) & subtitle berhasil diterapkan ke visualizer!`);
     } catch (err: any) {
@@ -741,17 +1829,28 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
 
   // Download cut WAV
   const handleDownloadTrimWav = async () => {
-    if (!trimRange) return;
+    if (!isAudioClipsModified && !trimRange) return;
     try {
       setIsApplyingTrim(true);
       const audioBlob = await AudioTrimmerJoiner.getTrackAudioBlob(currentTrack);
 
-      const cutTitle = `${currentTrack.title}_Cut_${Math.round(trimRange.start)}-${Math.round(trimRange.end)}s.wav`;
-      const trimResult = await AudioTrimmerJoiner.trimAudioFile(
+      const sortedClips = [...audioClips].sort((a, b) => a.start - b.start);
+      const segments =
+        trimRange
+          ? [{ start: trimRange.start, end: trimRange.end }]
+          : sortedClips.map((c) => ({
+              start: c.sourceStart ?? c.start,
+              end: c.sourceEnd ?? c.end,
+            }));
+
+      const totalDur = segments.reduce((sum, s) => sum + Math.max(0, s.end - s.start), 0);
+      const cutTitle = `${currentTrack.title}_Cut_${Math.round(totalDur)}s.wav`;
+
+      const trimResult = await AudioTrimmerJoiner.sliceAndJoinSegments(
         audioBlob,
-        trimRange.start,
-        trimRange.end,
-        cutTitle
+        segments,
+        cutTitle,
+        { format: 'wav' }
       );
 
       const url = URL.createObjectURL(trimResult.blob);
@@ -770,6 +1869,29 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
     }
   };
 
+  // Export Subtitle / Lyrics to .SRT
+  const handleExportSrt = () => {
+    if (!subtitleConfig.lyrics || subtitleConfig.lyrics.length === 0) {
+      setStatusMessage('⚠️ Tidak ada lirik subtitle untuk disimpan!');
+      return;
+    }
+    const srt = WhisperAIService.exportToSrt(subtitleConfig.lyrics);
+    const blob = new Blob([srt], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safeTitle = (currentTrack?.title || 'lirik')
+      .replace(/[^a-zA-Z0-9_\-\s]/g, '')
+      .trim()
+      .replace(/\s+/g, '_');
+    a.download = `${safeTitle || 'lirik'}.srt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setStatusMessage(`💾 File lirik .SRT (${subtitleConfig.lyrics.length} baris) berhasil disimpan!`);
+  };
+
   // Generate ruler tick marks
   const rulerTicks = useMemo(() => {
     const stepSeconds = zoomLevel === 1 ? 15 : zoomLevel === 2 ? 8 : zoomLevel === 3 ? 4 : 2;
@@ -784,8 +1906,29 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
     return ticks;
   }, [effectiveDuration, zoomLevel]);
 
+  // Map raw audio currentTime to timeline coordinate
+  const currentTimelineTime = useMemo(() => {
+    if (audioClips.length === 0 || !isAudioClipsModified) return currentTime;
+    const sorted = [...audioClips].sort((a, b) => a.start - b.start);
+    const clip = sorted.find((c) => {
+      const sStart = c.sourceStart ?? c.start;
+      const sEnd = c.sourceEnd ?? c.end;
+      return currentTime >= sStart - 0.05 && currentTime <= sEnd + 0.05;
+    });
+    if (clip) {
+      const sStart = clip.sourceStart ?? clip.start;
+      const offset = Math.max(0, currentTime - sStart);
+      return Math.min(clip.end, clip.start + offset);
+    }
+    const nextClip = sorted.find((c) => (c.sourceStart ?? c.start) >= currentTime);
+    if (nextClip) {
+      return nextClip.start;
+    }
+    return currentTime;
+  }, [currentTime, audioClips, isAudioClipsModified]);
+
   // Current playhead percentage
-  const playheadPercent = (currentTime / effectiveDuration) * 100;
+  const playheadPercent = (currentTimelineTime / effectiveDuration) * 100;
 
   // Active trim coordinates
   const trimStartPercent = trimRange ? (trimRange.start / effectiveDuration) * 100 : 0;
@@ -810,6 +1953,32 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
             <span className="hidden xs:inline">Split</span>
           </button>
 
+          {/* Hapus Klip Terpilih (Delete Key / Toolbar Button) */}
+          <button
+            onClick={handleDeleteSelectedClip}
+            disabled={!hasSelectedClip}
+            className={`px-2 sm:px-2.5 py-1 rounded-lg border flex items-center gap-1.5 font-bold transition-all active:scale-95 shrink-0 ${
+              hasSelectedClip
+                ? 'bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 hover:text-rose-100 border-rose-500/50 shadow-sm cursor-pointer'
+                : 'bg-white/[0.02] text-slate-500 border-white/5 opacity-40 cursor-not-allowed'
+            }`}
+            title={
+              hasSelectedClip
+                ? selectedBRollId
+                  ? 'Hapus klip B-Roll yang sedang dipilih (Tekan tombol Delete / Backspace)'
+                  : selectedImageId
+                  ? 'Hapus slide foto/video yang sedang dipilih (Tekan tombol Delete / Backspace)'
+                  : 'Hapus klip yang sedang dipilih (Tekan tombol Delete / Backspace)'
+                : 'Pilih klip B-roll, media foto, atau potongan audio terlebih dahulu untuk menghapus'
+            }
+          >
+            <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+            <span>Hapus</span>
+            <span className="text-[9px] font-mono px-1 py-0.2 bg-black/40 rounded border border-white/10 hidden sm:inline">
+              Del
+            </span>
+          </button>
+
           {/* Quick Trim Left / Right Shortcuts */}
           <button
             onClick={handleTrimBeforePlayhead}
@@ -826,6 +1995,65 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
           >
             Kanan ▶
           </button>
+
+          {/* Tutup Ruang Kosong (Tutup Semua Gap) */}
+          {audioGaps.length > 0 && (
+            <button
+              onClick={handleCloseAllGaps}
+              className="px-2 sm:px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 border border-rose-500/50 flex items-center gap-1.5 font-bold transition-all active:scale-95 shrink-0 animate-pulse shadow-sm"
+              title="Hapus semua ruang kosong (gap) di timeline dan rapatkan klip audio"
+            >
+              <Scissors className="w-3.5 h-3.5 text-rose-400 rotate-90" />
+              <span>Tutup {audioGaps.length} Ruang Kosong</span>
+            </button>
+          )}
+
+          {/* Prominent Apply Cut & Subtitles Button */}
+          {(trimRange || isAudioClipsModified) && (
+            <button
+              onClick={handleApplyTrimPermanently}
+              disabled={isApplyingTrim}
+              className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-emerald-400 via-teal-400 to-cyan-400 hover:from-emerald-300 hover:to-cyan-300 text-black font-black flex items-center gap-1.5 shadow-lg shadow-emerald-500/25 transition-all active:scale-95 shrink-0 disabled:opacity-50 border border-emerald-300/60"
+              title="Terapkan potongan audio dan sinkronkan subtitle secara permanen ke visualizer"
+            >
+              <Check className="w-3.5 h-3.5 stroke-[3]" />
+              <span className="text-[11px] font-black tracking-tight">
+                💾 Simpan Cut & Subtitle ({formatSec(trimRange ? trimRange.end - trimRange.start : totalAudioClipsDuration)})
+              </span>
+            </button>
+          )}
+
+          {/* Quick Nudge / Shift Buttons for Selected Audio Clip */}
+          {selectedAudioClipId && audioClips.length > 0 && (
+            <div className="flex items-center gap-0.5 bg-white/[0.05] px-1 py-0.5 rounded-lg border border-white/10 shrink-0 text-[11px]">
+              <span className="text-slate-400 text-[10px] mr-1 hidden md:inline font-mono">
+                Geser:
+              </span>
+              <button
+                onClick={() => handleShiftClip(selectedAudioClipId, -1)}
+                className="px-1.5 py-0.5 text-slate-300 hover:text-cyan-300 hover:bg-white/10 rounded transition-colors flex items-center gap-0.5 font-mono text-[10px]"
+                title="Geser klip ke kiri 1 detik"
+              >
+                <ChevronsLeft className="w-3 h-3 text-cyan-400" />
+                <span>-1s</span>
+              </button>
+              <button
+                onClick={() => handleSnapClipToLeft(selectedAudioClipId)}
+                className="px-1.5 py-0.5 text-cyan-300 hover:bg-cyan-500/20 rounded transition-colors font-bold text-[10px]"
+                title="Rapatkan klip ke kiri (tutup ruang kosong di kiri klip)"
+              >
+                ⏮ Rapatkan
+              </button>
+              <button
+                onClick={() => handleShiftClip(selectedAudioClipId, 1)}
+                className="px-1.5 py-0.5 text-slate-300 hover:text-cyan-300 hover:bg-white/10 rounded transition-colors flex items-center gap-0.5 font-mono text-[10px]"
+                title="Geser klip ke kanan 1 detik"
+              >
+                <span>+1s</span>
+                <ChevronsRight className="w-3 h-3 text-cyan-400" />
+              </button>
+            </div>
+          )}
 
           {/* Edit Subtitle Text */}
           {onOpenSubtitleEditor && (
@@ -886,38 +2114,60 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
             </button>
           )}
 
-          {/* Tambah Gambar ke Timeline */}
+          {/* Tambah Media (Foto / Video) ke Timeline */}
           <button
             onClick={() => imageFileInputRef.current?.click()}
             className="px-2 sm:px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5 font-bold transition-all active:scale-95 shrink-0"
-            title="Tambah Gambar / Wallpaper / Logo ke Timeline Visualizer"
+            title="Tambah Foto atau Video ke Timeline Visualizer"
           >
             <ImageIcon className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="hidden md:inline">+ Gambar</span>
-            <span className="md:hidden">+ Foto</span>
+            <span className="hidden md:inline">+ Foto/Video</span>
+            <span className="md:hidden">+ Media</span>
           </button>
+
+          {/* Ekstrak Foto & Video dari File ZIP */}
+          <button
+            onClick={() => zipFileInputRef.current?.click()}
+            className="px-2 sm:px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 flex items-center gap-1.5 font-bold transition-all active:scale-95 shrink-0"
+            title="Ekstrak Foto dan Video dari File ZIP ke Timeline Slideshow"
+          >
+            <FolderArchive className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden md:inline">+ Dari ZIP</span>
+            <span className="md:hidden">+ ZIP</span>
+          </button>
+
           <input
             ref={imageFileInputRef}
             type="file"
-            accept="image/*"
+            accept="image/*,video/*,.zip,.zipx,application/zip,application/x-zip-compressed,multipart/x-zip,application/octet-stream,*/*"
+            multiple
+            className="hidden"
+            onChange={handleImageFilePicked}
+          />
+          <input
+            ref={zipFileInputRef}
+            type="file"
+            accept=".zip,.zipx,application/zip,application/x-zip-compressed,multipart/x-zip,application/octet-stream,*/*"
             multiple
             className="hidden"
             onChange={handleImageFilePicked}
           />
 
-          {/* If trim is active, show Apply and Download options */}
-          {trimRange && (
+          {/* If trim is active or clips are split/modified, show Apply and Download options */}
+          {(trimRange || isAudioClipsModified) && (
             <>
               <div className="h-4 w-[1px] bg-white/15 mx-0.5" />
 
               <button
                 onClick={handleApplyTrimPermanently}
                 disabled={isApplyingTrim}
-                className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-black font-black flex items-center gap-1 shadow-sm transition-all active:scale-95 shrink-0 disabled:opacity-50"
-                title="Terapkan potongan ini secara permanen ke lagu visualizer"
+                className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-cyan-400 to-indigo-500 hover:from-cyan-300 hover:to-indigo-400 text-black font-black flex items-center gap-1 shadow-sm transition-all active:scale-95 shrink-0 disabled:opacity-50"
+                title="Terapkan potongan audio ini secara permanen ke visualizer"
               >
                 <Check className="w-3.5 h-3.5 stroke-[3]" />
-                <span className="text-[11px]">Terapkan Cut ({formatSec(trimRange.end - trimRange.start)})</span>
+                <span className="text-[11px]">
+                  Terapkan Cut ({formatSec(trimRange ? trimRange.end - trimRange.start : totalAudioClipsDuration)})
+                </span>
               </button>
 
               <button
@@ -1081,6 +2331,136 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
             className="w-14 sm:w-16 h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400 hidden md:block"
           />
 
+          {/* Menu Sembunyikan / Tampilkan Baris Media */}
+          <div className="relative">
+            <button
+              onClick={() => setShowTrackVisibilityMenu(!showTrackVisibilityMenu)}
+              className={`p-1 sm:px-2 sm:py-1 rounded-lg border text-xs flex items-center gap-1.5 transition-all ${
+                hiddenTracksCount > 0
+                  ? 'bg-indigo-500/20 border-indigo-400/60 text-indigo-200 shadow-sm'
+                  : 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300 hover:text-white'
+              }`}
+              title="Atur visibilitas baris media di timeline (Sembunyikan/Tampilkan baris)"
+            >
+              {hiddenTracksCount > 0 ? (
+                <EyeOff className="w-3.5 h-3.5 text-indigo-400" />
+              ) : (
+                <Layers className="w-3.5 h-3.5 text-cyan-400" />
+              )}
+              <span className="hidden lg:inline font-medium">Baris Trek</span>
+              {hiddenTracksCount > 0 && (
+                <span className="bg-indigo-500 text-white text-[9px] font-bold px-1.5 py-0.2 rounded-full">
+                  {4 - hiddenTracksCount}/4
+                </span>
+              )}
+            </button>
+
+            {showTrackVisibilityMenu && (
+              <div className="absolute bottom-full mb-2 right-0 w-64 bg-[#0E1322] border border-white/20 rounded-2xl shadow-2xl p-2.5 z-50 animate-in fade-in">
+                <div className="flex items-center justify-between pb-2 border-b border-white/10 mb-2">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-white">
+                    <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Tampilan Baris Media</span>
+                  </div>
+                  {hiddenTracksCount > 0 && (
+                    <button
+                      onClick={showAllTracks}
+                      className="text-[9px] text-cyan-300 hover:text-cyan-200 font-bold underline"
+                    >
+                      Tampilkan Semua
+                    </button>
+                  )}
+                </div>
+
+                <div className="space-y-1 text-xs">
+                  {/* Audio Track Toggle */}
+                  <button
+                    onClick={() => toggleTrackVisibility('audio')}
+                    className={`w-full p-2 rounded-xl flex items-center justify-between transition-colors ${
+                      trackVisibility.audio
+                        ? 'bg-cyan-950/40 text-cyan-200 border border-cyan-500/30'
+                        : 'text-slate-400 hover:bg-white/5 opacity-60'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Music className="w-3.5 h-3.5 text-cyan-400" />
+                      <span className="font-semibold">Audio Master</span>
+                    </div>
+                    {trackVisibility.audio ? (
+                      <Eye className="w-3.5 h-3.5 text-cyan-400" />
+                    ) : (
+                      <EyeOff className="w-3.5 h-3.5 text-slate-500" />
+                    )}
+                  </button>
+
+                  {/* Media / Slideshow Track Toggle */}
+                  <button
+                    onClick={() => toggleTrackVisibility('media')}
+                    className={`w-full p-2 rounded-xl flex items-center justify-between transition-colors ${
+                      trackVisibility.media
+                        ? 'bg-emerald-950/40 text-emerald-200 border border-emerald-500/30'
+                        : 'text-slate-400 hover:bg-white/5 opacity-60'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <ImageIcon className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="font-semibold">Media / Foto Slide</span>
+                    </div>
+                    {trackVisibility.media ? (
+                      <Eye className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <EyeOff className="w-3.5 h-3.5 text-slate-500" />
+                    )}
+                  </button>
+
+                  {/* B-Roll Track Toggle */}
+                  <button
+                    onClick={() => toggleTrackVisibility('broll')}
+                    className={`w-full p-2 rounded-xl flex items-center justify-between transition-colors ${
+                      trackVisibility.broll
+                        ? 'bg-violet-950/40 text-violet-200 border border-violet-500/30'
+                        : 'text-slate-400 hover:bg-white/5 opacity-60'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Film className="w-3.5 h-3.5 text-violet-400" />
+                      <span className="font-semibold">B-Roll Cutaway</span>
+                    </div>
+                    {trackVisibility.broll ? (
+                      <Eye className="w-3.5 h-3.5 text-violet-400" />
+                    ) : (
+                      <EyeOff className="w-3.5 h-3.5 text-slate-500" />
+                    )}
+                  </button>
+
+                  {/* Subtitles Track Toggle */}
+                  <button
+                    onClick={() => toggleTrackVisibility('subtitle')}
+                    className={`w-full p-2 rounded-xl flex items-center justify-between transition-colors ${
+                      trackVisibility.subtitle
+                        ? 'bg-amber-950/40 text-amber-200 border border-amber-500/30'
+                        : 'text-slate-400 hover:bg-white/5 opacity-60'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Type className="w-3.5 h-3.5 text-amber-400" />
+                      <span className="font-semibold">Subtitles & Lirik</span>
+                    </div>
+                    {trackVisibility.subtitle ? (
+                      <Eye className="w-3.5 h-3.5 text-amber-400" />
+                    ) : (
+                      <EyeOff className="w-3.5 h-3.5 text-slate-500" />
+                    )}
+                  </button>
+                </div>
+
+                <div className="mt-2 pt-2 border-t border-white/10 text-[10px] text-slate-400 text-center">
+                  Klik ikon mata pada tiap baris untuk sembunyikan baris.
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Timeline Zoom Buttons */}
           <div className="flex items-center gap-0.5 bg-black/40 p-0.5 rounded-lg border border-white/10">
             <button
@@ -1136,6 +2516,14 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
                   <span>Tambah Foto</span>
                 </button>
                 <button
+                  onClick={() => zipFileInputRef.current?.click()}
+                  className="px-2 py-0.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-semibold flex items-center gap-1 transition-all active:scale-95"
+                  title="Ekstrak foto langsung dari file ZIP ke slideshow"
+                >
+                  <FolderArchive className="w-3 h-3 text-amber-400" />
+                  <span>Upload ZIP</span>
+                </button>
+                <button
                   onClick={() => setShowAiMatchModal(true)}
                   className="px-2.5 py-0.5 rounded-lg bg-gradient-to-r from-cyan-500/25 to-indigo-500/25 hover:from-cyan-500/40 hover:to-indigo-500/40 text-cyan-300 border border-cyan-500/40 text-[11px] font-bold flex items-center gap-1.5 transition-all active:scale-95 shadow-sm"
                   title="AI Analisis Nama Gambar & Cocokkan ke Timestamp Lirik Lagu Otomatis"
@@ -1147,6 +2535,79 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
                   <span className="hidden sm:inline-flex text-[9px] px-1.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-medium">
                     🎵 Mode Lirik AI Aktif
                   </span>
+                )}
+
+                {/* AI Camera Effects Director Button */}
+                <button
+                  onClick={() => {
+                    // If multiImageSlides is empty but multiImageUrls exists, materialize first
+                    if (!backgroundConfig.multiImageSlides || backgroundConfig.multiImageSlides.length === 0) {
+                      handleSetSlideVisualEffect(0, 'none');
+                    }
+                    setIsAiEffectModalOpen(true);
+                  }}
+                  className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-gradient-to-r from-amber-500/25 via-orange-500/20 to-amber-600/20 hover:from-amber-500/35 hover:to-orange-500/35 border border-amber-500/40 text-amber-200 text-[10.5px] font-bold transition-all shadow-sm active:scale-95 shrink-0"
+                  title="AI Director: Analisis frame dan pasang efek kamera secara otomatis dan seimbang"
+                >
+                  <Sparkles className="w-3 h-3 text-amber-300 animate-pulse" />
+                  <span className="hidden md:inline">✨ Rekomendasi Efek AI</span>
+                  <span className="md:hidden">✨ Efek AI</span>
+                </button>
+
+                {/* Quick Add Visual Effect at Playhead */}
+                <div className="flex items-center gap-1 bg-amber-500/10 border border-amber-500/30 px-1.5 py-0.5 rounded-lg">
+                  <Wand2 className="w-3 h-3 text-amber-400" />
+                  <span className="text-[10px] text-amber-300 font-bold hidden md:inline">Efek Frame:</span>
+                  <select
+                    onChange={(e) => {
+                      const val = e.target.value as VisualEffectType;
+                      if (val !== 'none') {
+                        const cur = Number(currentTime.toFixed(2));
+                        const currentSlides = backgroundConfig.multiImageSlides || [];
+                        const activeIdx = currentSlides.findIndex((s) => cur >= s.startSec && cur < s.endSec);
+                        if (activeIdx !== -1) {
+                          handleSetSlideVisualEffect(activeIdx, val);
+                        } else {
+                          handleAddTimelineFxAtPlayhead(val);
+                        }
+                      }
+                      e.target.value = 'none';
+                    }}
+                    defaultValue="none"
+                    className="bg-transparent text-amber-200 text-[10px] font-bold outline-none cursor-pointer"
+                    title="Pasang Efek Kamera (Distorsi, Kamera Jadul, Cacing-cacing) pada slide/frame di posisi jarum playhead saat ini"
+                  >
+                    <option value="none" className="bg-slate-900 text-slate-400">+ Efek di Posisi Jarum...</option>
+                    {VISUAL_EFFECT_OPTIONS.filter((o) => o.id !== 'none').map((opt) => (
+                      <option key={opt.id} value={opt.id} className="bg-slate-900 text-white">
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {backgroundConfig.timelineFxClips && backgroundConfig.timelineFxClips.length > 0 && (
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {backgroundConfig.timelineFxClips.map((fx) => {
+                      const opt = VISUAL_EFFECT_OPTIONS.find((o) => o.id === fx.effect);
+                      return (
+                        <div
+                          key={fx.id}
+                          className="flex items-center gap-1 bg-amber-500/20 text-amber-200 border border-amber-500/40 px-1.5 py-0.5 rounded text-[10px] font-medium"
+                          title={`Efek ${opt?.label || fx.effect}: ${formatSec(fx.startSec)} - ${formatSec(fx.endSec)}`}
+                        >
+                          <span>{opt?.icon} {opt?.shortLabel} ({formatSec(fx.startSec)}-{formatSec(fx.endSec)})</span>
+                          <button
+                            onClick={() => handleRemoveTimelineFx(fx.id)}
+                            className="text-white/60 hover:text-rose-400 ml-0.5 font-bold text-[11px] leading-none"
+                            title="Hapus efek ini"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
               </div>
 
@@ -1216,6 +2677,16 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
                   title={`Bagi rata durasi lagu (${formatSec(effectiveDuration)}) ke ${backgroundConfig.multiImageUrls?.length || 1} foto agar pas dari awal sampai akhir`}
                 >
                   <span>⚡ Pas Sesuai Lagu</span>
+                </button>
+
+                {/* "Isi Jeda Musik" Button */}
+                <button
+                  onClick={handleAutoFillGaps}
+                  className="px-2 py-0.5 rounded-lg bg-gradient-to-r from-cyan-500/25 to-blue-500/25 hover:from-cyan-500/40 hover:to-blue-500/40 text-cyan-300 border border-cyan-500/40 text-[10px] font-bold flex items-center gap-1 transition-all active:scale-95 shadow-sm"
+                  title="Otomatis pecah jeda instrumental (intro panjang/solo musik) menjadi foto-foto bergantian dinamis agar tidak monoton"
+                >
+                  <Sparkles className="w-3 h-3 text-cyan-400" />
+                  <span>⚡ Isi Jeda Musik</span>
                 </button>
               </div>
 
@@ -1297,90 +2768,208 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
             </div>
           )}
 
-          <div className="flex flex-col h-48 sm:h-56 relative overflow-hidden">
+          <div className="flex flex-col h-60 sm:h-72 relative overflow-hidden">
             {/* Left Track Headers (CapCut Track Sidebar) */}
             <div className="absolute left-0 top-0 bottom-0 w-24 sm:w-32 bg-[#090D17] border-r border-white/10 z-20 flex flex-col text-[10px] font-bold text-slate-400">
               {/* Ruler Header Corner */}
               <div className="h-6 border-b border-white/10 px-2 flex items-center justify-between text-slate-500 font-mono text-[9px] bg-black/40">
                 <span>TRACKS</span>
-                <span className="text-cyan-400">TIME</span>
+                {hiddenTracksCount > 0 ? (
+                  <button
+                    onClick={showAllTracks}
+                    className="text-amber-400 hover:text-amber-300 font-bold flex items-center gap-0.5 text-[8px]"
+                    title={`${hiddenTracksCount} baris disembunyikan. Klik untuk tampilkan semua.`}
+                  >
+                    <EyeOff className="w-2.5 h-2.5" />
+                    <span>+{hiddenTracksCount}</span>
+                  </button>
+                ) : (
+                  <span className="text-cyan-400">TIME</span>
+                )}
               </div>
 
               {/* Track 1: Audio Header */}
-              <div className="h-14 sm:h-16 border-b border-white/5 px-2 flex flex-col justify-center gap-0.5 bg-cyan-950/20 text-cyan-300">
-                <div className="flex items-center gap-1 truncate">
-                  <Music className="w-3 h-3 text-cyan-400 shrink-0" />
-                  <span className="truncate">Audio Master</span>
+              {trackVisibility.audio && (
+                <div className="h-14 sm:h-16 border-b border-white/5 px-2 flex flex-col justify-center gap-0.5 bg-cyan-950/20 text-cyan-300 group/th">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1 truncate">
+                      <Music className="w-3 h-3 text-cyan-400 shrink-0" />
+                      <span className="truncate">Audio Master</span>
+                    </div>
+                    <button
+                      onClick={() => toggleTrackVisibility('audio')}
+                      className="p-1 rounded hover:bg-white/10 text-slate-500 hover:text-cyan-300 transition-colors opacity-70 group-hover/th:opacity-100"
+                      title="Sembunyikan baris Audio Master"
+                    >
+                      <Eye className="w-3 h-3" />
+                    </button>
+                  </div>
+                  <span className="text-[8px] sm:text-[9px] font-mono text-slate-500 truncate">
+                    {currentTrack.genre || 'Original WAV'}
+                  </span>
                 </div>
-                <span className="text-[8px] sm:text-[9px] font-mono text-slate-500 truncate">
-                  {currentTrack.genre || 'Original WAV'}
-                </span>
-              </div>
+              )}
 
               {/* Track 2: Image / Media Header */}
-              <div
-                onDragOver={handleMediaDragOver}
-                onDragEnter={handleMediaDragOver}
-                onDragLeave={handleMediaDragLeave}
-                onDrop={handleMediaDrop}
-                className={`h-14 sm:h-16 border-b border-white/5 px-2 flex flex-col justify-center gap-0.5 transition-colors ${
-                  isDraggingMediaOver ? 'bg-emerald-800/40 text-emerald-200' : 'bg-emerald-950/20 text-emerald-300'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1 truncate">
-                    <ImageIcon className="w-3 h-3 text-emerald-400 shrink-0" />
-                    <span className="truncate">Media / Foto</span>
+              {trackVisibility.media && (
+                <div
+                  onDragOver={handleMediaDragOver}
+                  onDragEnter={handleMediaDragOver}
+                  onDragLeave={handleMediaDragLeave}
+                  onDrop={handleMediaDrop}
+                  className={`h-14 sm:h-16 border-b border-white/5 px-2 flex flex-col justify-center gap-0.5 transition-colors group/th ${
+                    isDraggingMediaOver ? 'bg-emerald-800/40 text-emerald-200' : 'bg-emerald-950/20 text-emerald-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1 truncate">
+                      <ImageIcon className="w-3 h-3 text-emerald-400 shrink-0" />
+                      <span className="truncate">Media / Foto</span>
+                    </div>
+                    <div className="flex items-center gap-0.5">
+                      <button
+                        onClick={() => zipFileInputRef.current?.click()}
+                        className="text-[8px] bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 px-1 py-0.5 rounded font-bold transition-colors flex items-center gap-0.5"
+                        title="Ekstrak foto langsung dari file ZIP"
+                      >
+                        <FolderArchive className="w-2.5 h-2.5" />
+                        ZIP
+                      </button>
+                      <button
+                        onClick={() => imageFileInputRef.current?.click()}
+                        className="text-[8px] bg-emerald-500/20 hover:bg-emerald-500/40 text-emerald-300 px-1 py-0.5 rounded font-bold transition-colors"
+                        title="Tambah Gambar Baru ke Visualizer (Bisa pilih banyak foto)"
+                      >
+                        + Foto
+                      </button>
+                      <button
+                        onClick={() => toggleTrackVisibility('media')}
+                        className="p-0.5 rounded hover:bg-white/10 text-slate-500 hover:text-emerald-300 transition-colors opacity-70 group-hover/th:opacity-100 ml-0.5"
+                        title="Sembunyikan baris Media / Foto"
+                      >
+                        <Eye className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
-                  <button
-                    onClick={() => imageFileInputRef.current?.click()}
-                    className="text-[8px] bg-emerald-500/20 hover:bg-emerald-500/40 text-emerald-300 px-1 rounded font-bold transition-colors"
-                    title="Tambah Gambar Baru ke Visualizer (Bisa pilih banyak foto)"
-                  >
-                    + Foto
-                  </button>
+                  <span className="text-[8px] font-mono text-slate-500 truncate">
+                    {backgroundConfig.type === 'multi_image' && backgroundConfig.multiImageUrls?.length
+                      ? `${backgroundConfig.multiImageUrls.length} Slideshow`
+                      : imageClips.length > 0
+                      ? `${imageClips.length} Gambar`
+                      : 'Drag & Drop Foto'}
+                  </span>
                 </div>
-                <span className="text-[8px] font-mono text-slate-500 truncate">
-                  {backgroundConfig.type === 'multi_image' && backgroundConfig.multiImageUrls?.length
-                    ? `${backgroundConfig.multiImageUrls.length} Slideshow`
-                    : imageClips.length > 0
-                    ? `${imageClips.length} Gambar`
-                    : 'Drag & Drop Foto'}
-                </span>
-              </div>
+              )}
+
+              {/* Track 2.5: B-Roll / Cutaway Header */}
+              {trackVisibility.broll && (
+                <div className="h-12 sm:h-14 border-b border-white/5 px-2 flex flex-col justify-center gap-0.5 bg-violet-950/25 text-violet-300 group/th">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1 truncate">
+                      <Film className="w-3 h-3 text-violet-400 shrink-0" />
+                      <span className="truncate">B-Roll Cutaway</span>
+                    </div>
+                    <div className="flex items-center gap-0.5">
+                      <button
+                        onClick={() => {
+                          setBRollModalTab('stock');
+                          setIsBRollModalOpen(true);
+                        }}
+                        className="text-[8px] bg-emerald-500/20 hover:bg-emerald-500/40 text-emerald-200 px-1 py-0.5 rounded font-bold transition-colors flex items-center gap-0.5"
+                        title="Cari Stok Video & Foto Bebas Royalti (Pexels, Pixabay, Wikimedia, dsb.)"
+                      >
+                        <Film className="w-2.5 h-2.5 text-emerald-300" />
+                        <span>Stok</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setBRollModalTab('ai');
+                          setIsBRollModalOpen(true);
+                        }}
+                        className="text-[8px] bg-cyan-500/20 hover:bg-cyan-500/40 text-cyan-200 px-1 py-0.5 rounded font-bold transition-colors flex items-center gap-0.5"
+                        title="Analisis Subtitle & Rekomendasikan B-Roll dengan AI"
+                      >
+                        <Sparkles className="w-2.5 h-2.5 text-cyan-300" />
+                        <span>AI</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setBRollModalTab('presets');
+                          setIsBRollModalOpen(true);
+                        }}
+                        className="text-[8px] bg-violet-500/20 hover:bg-violet-500/40 text-violet-200 px-1 py-0.5 rounded font-bold transition-colors flex items-center gap-0.5"
+                        title="Buka Pustaka Preset B-Roll"
+                      >
+                        <Sparkles className="w-2.5 h-2.5 text-violet-300" />
+                      </button>
+                      <button
+                        onClick={() => toggleTrackVisibility('broll')}
+                        className="p-0.5 rounded hover:bg-white/10 text-slate-500 hover:text-violet-300 transition-colors opacity-70 group-hover/th:opacity-100 ml-0.5"
+                        title="Sembunyikan baris B-Roll Cutaway"
+                      >
+                        <Eye className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                  <span className="text-[8px] font-mono text-slate-500 truncate">
+                    {(backgroundConfig.bRoll?.clips || []).length > 0
+                      ? `${backgroundConfig.bRoll?.clips.length} Klip Aktif`
+                      : 'Klip / PiP / Overlay'}
+                  </span>
+                </div>
+              )}
 
               {/* Track 3: Subtitle / Lyric Header */}
-              <div className="h-11 sm:h-12 px-2 flex flex-col justify-center gap-0.5 bg-amber-950/20 text-amber-300">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1 truncate">
-                    <Type className="w-3 h-3 text-amber-400 shrink-0" />
-                    <span className="truncate">Subtitles</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    {onOpenSubtitleEditor && (
+              {trackVisibility.subtitle && (
+                <div className="h-11 sm:h-12 px-2 flex flex-col justify-center gap-0.5 bg-amber-950/20 text-amber-300 group/th">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1 truncate">
+                      <Type className="w-3 h-3 text-amber-400 shrink-0" />
+                      <span className="truncate">Subtitles</span>
+                    </div>
+                    <div className="flex items-center gap-0.5">
+                      {onOpenSubtitleEditor && (
+                        <button
+                          onClick={onOpenSubtitleEditor}
+                          className="text-[8px] bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 px-1 py-0.5 rounded transition-colors font-bold"
+                          title="Buka Editor Teks Subtitle"
+                        >
+                          Edit
+                        </button>
+                      )}
+                      {onOpenWhisperModal && (
+                        <button
+                          onClick={onOpenWhisperModal}
+                          className="text-[8px] bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 px-1 py-0.5 rounded transition-colors font-bold flex items-center gap-0.5"
+                          title="Generate Subtitle Otomatis dengan Groq / OpenAI / KoboiLLM Whisper AI"
+                        >
+                          <Zap className="w-2.5 h-2.5" />
+                          <span>Whisper AI</span>
+                        </button>
+                      )}
                       <button
-                        onClick={onOpenSubtitleEditor}
-                        className="text-[8px] bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 px-1.5 py-0.5 rounded transition-colors font-bold"
-                        title="Buka Editor Teks Subtitle"
+                        onClick={handleExportSrt}
+                        disabled={!subtitleConfig.lyrics || subtitleConfig.lyrics.length === 0}
+                        className="text-[8px] bg-cyan-500/20 hover:bg-cyan-500/40 text-cyan-300 px-1 py-0.5 rounded transition-colors font-bold flex items-center gap-0.5 disabled:opacity-40"
+                        title="Simpan / Download Lirik dalam Format .SRT"
                       >
-                        Edit
+                        <Download className="w-2.5 h-2.5" />
+                        <span>SRT</span>
                       </button>
-                    )}
-                    {onOpenWhisperModal && (
                       <button
-                        onClick={onOpenWhisperModal}
-                        className="text-[8px] bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 px-1.5 py-0.5 rounded transition-colors font-bold"
-                        title="Generate Subtitle Otomatis dengan Groq STT"
+                        onClick={() => toggleTrackVisibility('subtitle')}
+                        className="p-0.5 rounded hover:bg-white/10 text-slate-500 hover:text-amber-300 transition-colors opacity-70 group-hover/th:opacity-100 ml-0.5"
+                        title="Sembunyikan baris Subtitles"
                       >
-                        ⚡ Groq
+                        <Eye className="w-3 h-3" />
                       </button>
-                    )}
+                    </div>
                   </div>
+                  <span className="text-[8px] font-mono text-slate-500 truncate">
+                    {subtitleConfig.lyrics.length} Segmen
+                  </span>
                 </div>
-                <span className="text-[8px] font-mono text-slate-500 truncate">
-                  {subtitleConfig.lyrics.length} Segmen
-                </span>
-              </div>
+              )}
             </div>
 
           {/* Main Scrollable Timeline Track Workspace */}
@@ -1410,99 +2999,222 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
               </div>
 
               {/* ---------------------------------------------------- */}
-              {/* B. TRACK 1: AUDIO WAVEFORM TRACK (CapCut Clip)       */}
               {/* ---------------------------------------------------- */}
-              <div className="h-14 sm:h-16 border-b border-white/5 relative p-1 flex items-center">
-                {/* Audio Clip Box */}
-                <div
-                  onClick={() => setSelectedClip('audio')}
-                  className={`w-full h-full rounded-xl relative overflow-hidden flex items-center transition-all ${
-                    selectedClip === 'audio'
-                      ? 'bg-gradient-to-r from-cyan-900/50 via-indigo-900/50 to-blue-900/50 border border-cyan-400/60 shadow-lg shadow-cyan-500/10'
-                      : 'bg-white/[0.04] border border-white/10'
-                  }`}
-                >
-                  {/* Waveform Visualization Bars */}
-                  <div className="absolute inset-0 flex items-center justify-between px-2 gap-[1px] opacity-75 pointer-events-none">
-                    {waveformBars.map((heightFactor, idx) => (
+              {/* B. TRACK 1: AUDIO WAVEFORM TRACK (CapCut Multi-Clip) */}
+              {/* ---------------------------------------------------- */}
+              {trackVisibility.audio && (
+                <div className="h-14 sm:h-16 border-b border-white/5 relative p-1 flex items-center bg-[#070A14]">
+                {/* Ruang Kosong (Gaps Antar Klip Ala CapCut) */}
+                {audioGaps.map((gap) => {
+                  const gapStartPct = (gap.start / effectiveDuration) * 100;
+                  const gapWidthPct = Math.max(0.5, (gap.duration / effectiveDuration) * 100);
+
+                  return (
+                    <div
+                      key={gap.id}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteGap(gap);
+                      }}
+                      className="timeline-gap-element absolute top-1 bottom-1 rounded-xl overflow-hidden flex items-center justify-center cursor-pointer transition-all border border-dashed border-rose-500/40 hover:border-rose-400 hover:bg-rose-500/20 bg-[repeating-linear-gradient(45deg,rgba(255,255,255,0.02),rgba(255,255,255,0.02)_6px,rgba(244,63,94,0.08)_6px,rgba(244,63,94,0.08)_12px)] group z-10 shadow-inner"
+                      style={{
+                        left: `${gapStartPct}%`,
+                        width: `${gapWidthPct}%`,
+                      }}
+                      title={`Ruang Kosong (${gap.duration.toFixed(1)}s) - Klik untuk hapus ruang kosong ini`}
+                    >
+                      <div className="flex items-center gap-1 text-[9px] font-bold text-rose-300 group-hover:text-white px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-xs shadow-sm border border-rose-500/30 transition-transform group-hover:scale-105 select-none pointer-events-none">
+                        <Scissors className="w-2.5 h-2.5 text-rose-400 rotate-90" />
+                        <span className="truncate">
+                          {gap.duration >= 1.5 ? `Tutup Gap (${gap.duration.toFixed(1)}s)` : 'Tutup'}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {audioClips.map((clip) => {
+                  const isSelected = selectedAudioClipId === clip.id;
+                  const isDraggingThis = draggingAudioClipId === clip.id;
+                  const clipStartPct = (clip.start / effectiveDuration) * 100;
+                  const clipWidthPct = Math.max(0.5, ((clip.end - clip.start) / effectiveDuration) * 100);
+                  const startBarIdx = Math.floor(((clip.sourceStart ?? clip.start) / effectiveDuration) * waveformBars.length);
+                  const endBarIdx = Math.ceil(((clip.sourceEnd ?? clip.end) / effectiveDuration) * waveformBars.length);
+                  const clipBars = waveformBars.slice(startBarIdx, Math.max(startBarIdx + 1, endBarIdx));
+
+                  return (
+                    <div
+                      key={clip.id}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedClip('audio');
+                        setSelectedAudioClipId(clip.id);
+                        setSelectedBRollId(null);
+                        setSelectedImageId(null);
+                      }}
+                      onMouseDown={(e) => handleAudioClipMouseDown(e, clip, 'body')}
+                      className={`audio-clip-element absolute top-1 bottom-1 rounded-xl overflow-hidden flex items-center transition-all select-none group ${
+                        isDraggingThis
+                          ? `${draggingAudioEdge ? 'cursor-ew-resize' : 'cursor-grabbing'} ring-2 ring-yellow-400 bg-cyan-950/95 border-2 border-yellow-400 z-30 shadow-2xl scale-[1.01]`
+                          : isSelected
+                          ? 'cursor-grab bg-gradient-to-r from-cyan-950/90 via-indigo-950/80 to-blue-950/90 border-2 border-cyan-400 ring-2 ring-cyan-400/30 shadow-lg shadow-cyan-500/20 z-20'
+                          : 'cursor-grab bg-white/[0.04] border border-white/10 hover:border-cyan-400/40 hover:bg-white/[0.08] z-10'
+                      }`}
+                      style={{
+                        left: `${clipStartPct}%`,
+                        width: `${clipWidthPct}%`,
+                      }}
+                      title={`${clip.name} (${formatSec(clip.start)} - ${formatSec(clip.end)}) - Klik & geser untuk memindahkan`}
+                    >
+                      {/* Left Trim Handle (Tarik Ujung Kiri) */}
                       <div
-                        key={idx}
-                        className={`w-1 rounded-full transition-all ${
-                          (idx / waveformBars.length) * 100 <= playheadPercent
-                            ? 'bg-cyan-400 shadow-sm shadow-cyan-400'
-                            : 'bg-indigo-400/40'
+                        onMouseDown={(e) => handleAudioClipMouseDown(e, clip, 'left')}
+                        className={`audio-trim-handle absolute left-0 top-0 bottom-0 w-2 sm:w-2.5 hover:w-3 cursor-ew-resize z-30 flex items-center justify-center transition-all rounded-l-xl ${
+                          isDraggingThis && draggingAudioEdge === 'left'
+                            ? 'bg-yellow-400 w-3 opacity-100'
+                            : 'bg-cyan-400/80 hover:bg-cyan-300 opacity-0 group-hover:opacity-100'
                         }`}
-                        style={{ height: `${heightFactor * 75}%` }}
-                      />
-                    ))}
-                  </div>
-
-                  {/* Clip Title Overlay */}
-                  <div className="absolute top-1 left-2.5 z-10 pointer-events-none flex items-center gap-1.5 text-white text-[10px] font-bold drop-shadow-md">
-                    <Music className="w-3 h-3 text-cyan-300" />
-                    <span>{currentTrack.title}</span>
-                    <span className="text-slate-400 font-normal text-[9px] hidden sm:inline">
-                      • {currentTrack.artist}
-                    </span>
-                  </div>
-
-                  {/* ------------------------------------------------ */}
-                  {/* TRIM HIGHLIGHT OVERLAY & HANDLES (Kuping CapCut) */}
-                  {/* ------------------------------------------------ */}
-                  {trimRange && (
-                    <>
-                      {/* Inactive Left Dimming */}
-                      <div
-                        className="absolute top-0 bottom-0 left-0 bg-black/75 backdrop-blur-[1px] pointer-events-none z-10"
-                        style={{ width: `${trimStartPercent}%` }}
-                      />
-
-                      {/* Inactive Right Dimming */}
-                      <div
-                        className="absolute top-0 bottom-0 right-0 bg-black/75 backdrop-blur-[1px] pointer-events-none z-10"
-                        style={{ width: `${100 - trimEndPercent}%` }}
-                      />
-
-                      {/* Active Trim Region Box */}
-                      <div
-                        className="absolute top-0 bottom-0 border-y-2 border-pink-400 bg-pink-500/10 pointer-events-none z-10"
-                        style={{
-                          left: `${trimStartPercent}%`,
-                          width: `${trimWidthPercent}%`,
-                        }}
+                        title="Tarik ujung kiri untuk memotong/memperpanjang klip"
                       >
-                        <div className="absolute top-1 right-2 text-[9px] font-mono text-pink-300 font-bold bg-black/60 px-1.5 py-0.5 rounded">
-                          Reff Cut: {formatSec(trimRange.end - trimRange.start)}
+                        <div className="w-[1.5px] h-3.5 bg-black/60 rounded-full" />
+                      </div>
+
+                      {/* Right Trim Handle (Tarik Ujung Kanan) */}
+                      <div
+                        onMouseDown={(e) => handleAudioClipMouseDown(e, clip, 'right')}
+                        className={`audio-trim-handle absolute right-0 top-0 bottom-0 w-2 sm:w-2.5 hover:w-3 cursor-ew-resize z-30 flex items-center justify-center transition-all rounded-r-xl ${
+                          isDraggingThis && draggingAudioEdge === 'right'
+                            ? 'bg-yellow-400 w-3 opacity-100'
+                            : 'bg-cyan-400/80 hover:bg-cyan-300 opacity-0 group-hover:opacity-100'
+                        }`}
+                        title="Tarik ujung kanan untuk memotong/memperpanjang klip"
+                      >
+                        <div className="w-[1.5px] h-3.5 bg-black/60 rounded-full" />
+                      </div>
+
+                      {/* Live Dragging Tooltip */}
+                      {isDraggingThis && (
+                        <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-yellow-400 text-black font-black text-[9px] px-2 py-0.5 rounded shadow-lg pointer-events-none z-50 whitespace-nowrap flex items-center gap-1">
+                          <ArrowLeftRight className="w-2.5 h-2.5" />
+                          <span>{formatSec(clip.start)} - {formatSec(clip.end)}</span>
                         </div>
+                      )}
+
+                      {/* Waveform Bars for this clip */}
+                      <div className="absolute inset-0 flex items-center justify-between px-2 gap-[1px] opacity-75 pointer-events-none">
+                        {clipBars.map((heightFactor, idx) => {
+                          const barGlobalSec = clip.start + (idx / Math.max(1, clipBars.length)) * (clip.end - clip.start);
+                          const isPast = currentTimelineTime >= barGlobalSec;
+                          return (
+                            <div
+                              key={idx}
+                              className={`w-1 rounded-full transition-all ${
+                                isPast
+                                  ? 'bg-cyan-400 shadow-sm shadow-cyan-400'
+                                  : 'bg-indigo-400/40'
+                              }`}
+                              style={{ height: `${heightFactor * 75}%` }}
+                            />
+                          );
+                        })}
                       </div>
 
-                      {/* Left Trim Handle */}
-                      <div
-                        onMouseDown={(e) => handleTrimHandleMouseDown(e, 'start')}
-                        className="trim-handle absolute top-0 bottom-0 w-3.5 bg-pink-500 hover:bg-pink-400 cursor-ew-resize z-20 flex items-center justify-center rounded-l-md shadow-lg group"
-                        style={{ left: `${trimStartPercent}%` }}
-                        title="Geser batas awal potongan audio"
-                      >
-                        <div className="w-1 h-4 bg-black/60 rounded-full" />
+                      {/* Clip Title & Duration Overlay */}
+                      <div className="absolute top-1 left-3 z-10 pointer-events-none flex items-center gap-1.5 text-white text-[10px] font-bold drop-shadow-md">
+                        <Music className="w-3 h-3 text-cyan-300" />
+                        <span>{clip.name}</span>
+                        <span className="text-slate-400 font-mono text-[9px]">
+                          ({(clip.end - clip.start).toFixed(1)}s)
+                        </span>
                       </div>
 
-                      {/* Right Trim Handle */}
-                      <div
-                        onMouseDown={(e) => handleTrimHandleMouseDown(e, 'end')}
-                        className="trim-handle absolute top-0 bottom-0 w-3.5 bg-pink-500 hover:bg-pink-400 cursor-ew-resize z-20 flex items-center justify-center rounded-r-md shadow-lg -translate-x-full group"
-                        style={{ left: `${trimEndPercent}%` }}
-                        title="Geser batas akhir potongan audio"
-                      >
-                        <div className="w-1 h-4 bg-black/60 rounded-full" />
+                      {/* Hover Action Controls (Putar Klip, Rapatkan, Hapus Klip) */}
+                      <div className="hidden group-hover:flex items-center gap-1 absolute right-2 top-1 bottom-1 z-20">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            globalAudioEngine.seek(clip.sourceStart ?? clip.start);
+                            if (!isPlaying) onTogglePlay();
+                          }}
+                          className="p-1 rounded-md bg-cyan-500/20 hover:bg-cyan-500/40 text-cyan-300 transition-colors"
+                          title="Putar dari awal klip ini"
+                        >
+                          <Play className="w-3 h-3 fill-current" />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSnapClipToLeft(clip.id);
+                          }}
+                          className="p-1 rounded-md bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 transition-colors"
+                          title="Rapatkan klip ini ke kiri (tutup ruang kosong sebelah kiri)"
+                        >
+                          <ChevronsLeft className="w-3 h-3" />
+                        </button>
+                        {audioClips.length > 1 && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteAudioClip(clip.id);
+                            }}
+                            className="p-1 rounded-md bg-rose-500/20 hover:bg-rose-500/40 text-rose-300 transition-colors"
+                            title="Hapus klip ini (buang bagian ini)"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        )}
                       </div>
-                    </>
-                  )}
-                </div>
+                    </div>
+                  );
+                })}
+
+                {/* If trimRange is active on timeline, show trim handles */}
+                {trimRange && (
+                  <>
+                    <div
+                      className="absolute top-0 bottom-0 left-0 bg-black/75 backdrop-blur-[1px] pointer-events-none z-10"
+                      style={{ width: `${trimStartPercent}%` }}
+                    />
+                    <div
+                      className="absolute top-0 bottom-0 right-0 bg-black/75 backdrop-blur-[1px] pointer-events-none z-10"
+                      style={{ width: `${100 - trimEndPercent}%` }}
+                    />
+                    <div
+                      className="absolute top-0 bottom-0 border-y-2 border-pink-400 bg-pink-500/10 pointer-events-none z-10"
+                      style={{
+                        left: `${trimStartPercent}%`,
+                        width: `${trimWidthPercent}%`,
+                      }}
+                    >
+                      <div className="absolute top-1 right-2 text-[9px] font-mono text-pink-300 font-bold bg-black/60 px-1.5 py-0.5 rounded">
+                        Reff: {formatSec(trimRange.end - trimRange.start)}
+                      </div>
+                    </div>
+                    <div
+                      onMouseDown={(e) => handleTrimHandleMouseDown(e, 'start')}
+                      className="trim-handle absolute top-0 bottom-0 w-3.5 bg-pink-500 hover:bg-pink-400 cursor-ew-resize z-20 flex items-center justify-center rounded-l-md shadow-lg group"
+                      style={{ left: `${trimStartPercent}%` }}
+                      title="Geser batas awal potongan audio"
+                    >
+                      <div className="w-1 h-4 bg-black/60 rounded-full" />
+                    </div>
+                    <div
+                      onMouseDown={(e) => handleTrimHandleMouseDown(e, 'end')}
+                      className="trim-handle absolute top-0 bottom-0 w-3.5 bg-pink-500 hover:bg-pink-400 cursor-ew-resize z-20 flex items-center justify-center rounded-r-md shadow-lg -translate-x-full group"
+                      style={{ left: `${trimEndPercent}%` }}
+                      title="Geser batas akhir potongan audio"
+                    >
+                      <div className="w-1 h-4 bg-black/60 rounded-full" />
+                    </div>
+                  </>
+                )}
               </div>
+            )}
 
-              {/* ---------------------------------------------------- */}
-              {/* C. TRACK 2: IMAGE / MEDIA TRACK                      */}
-              {/* ---------------------------------------------------- */}
+            {/* ---------------------------------------------------- */}
+            {/* C. TRACK 2: IMAGE / MEDIA TRACK                      */}
+            {/* ---------------------------------------------------- */}
+            {trackVisibility.media && (
               <div className="h-14 sm:h-16 border-b border-white/5 relative p-1 flex items-center">
                 <div
                   onClick={() => setSelectedClip('image')}
@@ -1521,77 +3233,151 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
                   {/* Visual Dropzone Overlay when Dragging File from Desktop */}
                   {isDraggingMediaOver && (
                     <div className="absolute inset-0 z-50 bg-emerald-950/90 backdrop-blur-sm flex items-center justify-center gap-2.5 text-emerald-300 font-bold text-xs pointer-events-none animate-pulse">
-                      <ImageIcon className="w-5 h-5 animate-bounce text-emerald-400" />
-                      <span>Lepaskan file foto di sini untuk menambahkan ke Slideshow Timeline!</span>
+                      <FolderArchive className="w-5 h-5 animate-bounce text-amber-400" />
+                      <span>Lepaskan file foto atau file ZIP di sini untuk otomatis mengekstrak ke Slideshow!</span>
                     </div>
                   )}
 
                   {imageClips.length === 0 ? (
-                    <button
-                      onClick={() => imageFileInputRef.current?.click()}
-                      className="w-full h-full border border-dashed border-emerald-500/30 hover:border-emerald-400/60 rounded-lg flex items-center justify-center gap-2 text-[10px] text-emerald-300/70 hover:text-emerald-300 transition-all cursor-pointer bg-emerald-950/10"
-                    >
-                      <ImageIcon className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>+ Drag & Drop atau Klik di sini untuk menambahkan foto (bisa pilih banyak foto untuk slideshow)</span>
-                    </button>
-                  ) : (
-                    imageClips.map((clip) => (
-                      <div
-                        key={clip.id}
-                        draggable={clip.type === 'slide'}
-                        onDragStart={(e) => {
-                          if (clip.originalIndex !== undefined) {
-                            handleSlideDragStart(e, clip.originalIndex);
-                          }
-                        }}
-                        onDragOver={(e) => e.preventDefault()}
-                        onDrop={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          if (draggedSlideIndex !== null && clip.originalIndex !== undefined) {
-                            handleSlideReorderDrop(draggedSlideIndex, clip.originalIndex);
-                            setDraggedSlideIndex(null);
-                          }
-                        }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedImageId(clip.id);
-                        }}
-                        className={`h-full rounded-lg bg-emerald-900/40 border p-1 flex items-center gap-2 relative group cursor-pointer transition-all select-none ${
-                          selectedImageId === clip.id
-                            ? 'border-emerald-400 shadow-md shadow-emerald-500/30'
-                            : 'border-emerald-500/30 hover:border-emerald-400/50'
-                        }`}
-                        style={{
-                          left: `${clip.startPct}%`,
-                          width: `${clip.widthPct}%`,
-                          position: 'absolute',
-                        }}
-                        title={
-                          clip.type === 'slide'
-                            ? `Slide Foto #${clip.slideIndex} (${(clip.duration || (backgroundConfig.multiImageInterval || 5)).toFixed(1)}s) - Klik untuk pilih, drag untuk atur urutan`
-                            : clip.title
-                        }
+                    <div className="w-full h-full flex items-center gap-2">
+                      <button
+                        onClick={() => imageFileInputRef.current?.click()}
+                        className="flex-1 h-full border border-dashed border-emerald-500/30 hover:border-emerald-400/60 rounded-lg flex items-center justify-center gap-2 text-[10px] text-emerald-300/80 hover:text-emerald-300 transition-all cursor-pointer bg-emerald-950/10"
                       >
-                        <img
-                          src={clip.url}
-                          alt=""
-                          className="h-full w-9 sm:w-11 object-cover rounded border border-white/15 shrink-0 bg-black pointer-events-none"
-                        />
-                        <div className="truncate flex-1 min-w-0 pr-1">
-                          <div className="flex items-center gap-1">
-                            <span className="text-[8px] font-bold uppercase px-1 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
-                              {clip.type === 'background' ? 'BG' : clip.type === 'center_logo' ? 'LOGO' : `FOTO ${clip.slideIndex || 1}`}
-                            </span>
-                            <span className="text-[10px] font-bold text-white truncate">{clip.title}</span>
-                          </div>
-                          <div className="text-[8px] font-mono text-slate-400 flex items-center gap-1">
-                            <span>{formatSec(clip.startSec)} - {formatSec(clip.endSec)}</span>
-                            {clip.duration && (
-                              <span className="text-cyan-400 font-bold">({clip.duration.toFixed(1)}s)</span>
+                        <ImageIcon className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>+ Drag & Drop / Klik untuk tambah foto</span>
+                      </button>
+                      <button
+                        onClick={() => zipFileInputRef.current?.click()}
+                        className="h-full px-3 border border-dashed border-amber-500/40 hover:border-amber-400/70 rounded-lg flex items-center justify-center gap-1.5 text-[10px] font-bold text-amber-300/90 hover:text-amber-300 transition-all cursor-pointer bg-amber-950/15 shrink-0"
+                        title="Ekstrak foto langsung dari arsip file ZIP"
+                      >
+                        <FolderArchive className="w-3.5 h-3.5 text-amber-400" />
+                        <span>📦 Ekstrak dari ZIP</span>
+                      </button>
+                    </div>
+                  ) : (
+                    imageClips.map((clip) => {
+                      const isVideoClip = clip.mediaType === 'video' || isVideoMedia(clip.url);
+                      return (
+                          <div
+                            key={clip.id}
+                            draggable={clip.type === 'slide'}
+                            onDragStart={(e) => {
+                              if (clip.originalIndex !== undefined) {
+                                handleSlideDragStart(e, clip.originalIndex);
+                              }
+                            }}
+                            onDragOver={(e) => e.preventDefault()}
+                            onDrop={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              if (draggedSlideIndex !== null && clip.originalIndex !== undefined) {
+                                handleSlideReorderDrop(draggedSlideIndex, clip.originalIndex);
+                                setDraggedSlideIndex(null);
+                              }
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedImageId(clip.id);
+                              setSelectedClip('image');
+                              setSelectedBRollId(null);
+                              setSelectedAudioClipId(null);
+                            }}
+                            className={`h-full rounded-lg border p-1 flex items-center gap-2 relative group cursor-pointer transition-all select-none ${
+                              isVideoClip
+                                ? selectedImageId === clip.id
+                                  ? 'bg-cyan-950/70 border-cyan-400 shadow-md shadow-cyan-500/30'
+                                  : 'bg-cyan-950/35 border-cyan-500/30 hover:border-cyan-400/50'
+                                : selectedImageId === clip.id
+                                ? 'bg-emerald-900/50 border-emerald-400 shadow-md shadow-emerald-500/30'
+                                : clip.visualEffect && clip.visualEffect !== 'none'
+                                ? 'bg-amber-950/40 border-amber-400/60 shadow-md shadow-amber-500/20 ring-1 ring-amber-400/40'
+                                : 'bg-emerald-900/30 border-emerald-500/30 hover:border-emerald-400/50'
+                            }`}
+                            style={{
+                              left: `${clip.startPct}%`,
+                              width: `${clip.widthPct}%`,
+                              position: 'absolute',
+                            }}
+                            title={
+                              clip.type === 'slide'
+                                ? `Slide ${isVideoClip ? 'Video' : 'Foto'} #${clip.slideIndex} (${(clip.duration || (backgroundConfig.multiImageInterval || 5)).toFixed(1)}s) - Klik untuk pilih, drag untuk atur urutan`
+                                : clip.title
+                            }
+                          >
+                            {isVideoClip ? (
+                              <div className="h-full w-9 sm:w-11 rounded border border-cyan-400/40 shrink-0 bg-black relative overflow-hidden flex items-center justify-center pointer-events-none shadow-sm">
+                                <video src={clip.url} className="h-full w-full object-cover" muted playsInline />
+                                <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/20 flex items-end justify-center pb-0.5">
+                                  <Video className="w-3 h-3 text-cyan-300 drop-shadow" />
+                                </div>
+                              </div>
+                            ) : (
+                              <img
+                                src={clip.url}
+                                alt=""
+                                className="h-full w-9 sm:w-11 object-cover rounded border border-white/15 shrink-0 bg-black pointer-events-none"
+                              />
                             )}
-                          </div>
-                        </div>
+                            <div className="truncate flex-1 min-w-0 pr-1">
+                              <div className="flex items-center gap-1">
+                                <span
+                                  className={`text-[8px] font-bold uppercase px-1 rounded border shrink-0 flex items-center gap-0.5 ${
+                                    isVideoClip
+                                      ? 'bg-cyan-500/25 text-cyan-300 border-cyan-400/50'
+                                      : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                                  }`}
+                                >
+                                  {isVideoClip ? (
+                                    <Video className="w-2.5 h-2.5 text-cyan-300" />
+                                  ) : (
+                                    <ImageIcon className="w-2.5 h-2.5 text-emerald-300" />
+                                  )}
+                                  <span>
+                                    {clip.type === 'background'
+                                      ? 'BG'
+                                      : clip.type === 'center_logo'
+                                      ? 'LOGO'
+                                      : isVideoClip
+                                      ? `VIDEO ${clip.slideIndex || 1}`
+                                      : `FOTO ${clip.slideIndex || 1}`}
+                                  </span>
+                                </span>
+                                <span className="text-[10px] font-bold text-white truncate">{clip.title}</span>
+                              </div>
+                              <div className="flex items-center justify-between text-[8px] font-mono text-slate-400 mt-0.5">
+                                <div className="truncate">
+                                  <span>{formatSec(clip.startSec)} - {formatSec(clip.endSec)}</span>
+                                  {clip.duration && (
+                                    <span className="text-cyan-400 font-bold ml-1">({clip.duration.toFixed(1)}s)</span>
+                                  )}
+                                </div>
+                                {clip.type === 'slide' && (
+                                  <div className="flex items-center ml-1" onClick={(e) => e.stopPropagation()}>
+                                    <select
+                                      value={clip.visualEffect || 'none'}
+                                      onChange={(e) => {
+                                        e.stopPropagation();
+                                        handleSetSlideVisualEffect(clip.originalIndex ?? clip.id, e.target.value as VisualEffectType);
+                                      }}
+                                      className={`text-[8px] font-bold px-1.5 py-0.5 rounded border outline-none cursor-pointer ${
+                                        clip.visualEffect && clip.visualEffect !== 'none'
+                                          ? VISUAL_EFFECT_OPTIONS.find((o) => o.id === clip.visualEffect)?.badgeClass || 'bg-amber-500/25 text-amber-300 border-amber-500/40'
+                                          : 'bg-black/60 text-slate-400 border-white/10 hover:text-white'
+                                      }`}
+                                      title="Pilih Efek Kamera Visual untuk frame/slide ini saja"
+                                    >
+                                      {VISUAL_EFFECT_OPTIONS.map((opt) => (
+                                        <option key={opt.id} value={opt.id} className="bg-slate-900 text-white">
+                                          {opt.icon} {opt.shortLabel}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
 
                         {/* Quick Hover Actions (Reorder buttons, Set BG, Set Logo, Delete) */}
                         <div className="hidden group-hover:flex items-center gap-0.5 absolute right-1 top-1 bottom-1 bg-black/90 backdrop-blur-sm px-1 rounded-md z-20 border border-white/10 shadow-lg">
@@ -1653,14 +3439,146 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
                           </button>
                         </div>
                       </div>
-                    ))
+                    );
+                  })
+                )}
+                </div>
+              </div>
+            )}
+
+              {/* ---------------------------------------------------- */}
+              {/* D. TRACK 2.5: B-ROLL / CUTAWAY OVERLAYS TRACK         */}
+              {/* ---------------------------------------------------- */}
+              {trackVisibility.broll && (
+                <div className="h-12 sm:h-14 border-b border-white/5 relative p-1 flex items-center">
+                <div
+                  onClick={() => {
+                    setSelectedClip('broll');
+                    setSelectedBRollId(null);
+                  }}
+                  className={`w-full h-full rounded-xl relative overflow-hidden flex items-center px-1 transition-all ${
+                    selectedClip === 'broll'
+                      ? 'bg-violet-950/40 border border-violet-500/50 shadow-inner'
+                      : 'bg-violet-950/15 border border-violet-500/20'
+                  }`}
+                >
+                  {(!backgroundConfig.bRoll?.clips || backgroundConfig.bRoll.clips.length === 0) ? (
+                    <div
+                      onClick={() => setIsBRollModalOpen(true)}
+                      className="h-full flex items-center justify-center text-[10px] text-violet-300/60 gap-1.5 cursor-pointer hover:text-violet-200 transition-colors w-full"
+                      title="Klik untuk membuka Studio B-Roll & Pustaka Preset"
+                    >
+                      <Film className="w-3 h-3 text-violet-400" />
+                      <span>Belum ada klip B-Roll. Klik di sini untuk menambah cutaway / PiP / overlay.</span>
+                    </div>
+                  ) : (
+                    backgroundConfig.bRoll.clips.map((bClip, bIdx) => {
+                      const startPct = (bClip.startSec / effectiveDuration) * 100;
+                      const widthPct = Math.max(1.5, ((bClip.endSec - bClip.startSec) / effectiveDuration) * 100);
+                      const isCurrent = currentTime >= bClip.startSec && currentTime <= bClip.endSec;
+                      const isSelected = selectedBRollId === bClip.id;
+
+                      return (
+                        <div
+                          key={bClip.id || bIdx}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedClip('broll');
+                            setSelectedBRollId(bClip.id);
+                            setSelectedImageId(null);
+                            setSelectedAudioClipId(null);
+                          }}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            setIsBRollModalOpen(true);
+                          }}
+                          className={`absolute top-0.5 bottom-0.5 rounded-lg px-2 text-[9px] font-semibold flex items-center justify-between truncate cursor-pointer transition-all border group ${
+                            isSelected
+                              ? 'bg-gradient-to-r from-violet-600 to-purple-600 text-white border-violet-300 shadow-md shadow-violet-600/40 z-20 ring-1 ring-violet-400'
+                              : isCurrent
+                              ? 'bg-gradient-to-r from-violet-700/80 to-purple-800/80 text-violet-100 border-violet-500/70 z-10'
+                              : 'bg-violet-900/60 text-violet-200 border-violet-700/40 hover:border-violet-400/50'
+                          }`}
+                          style={{
+                            left: `${startPct}%`,
+                            width: `${widthPct}%`,
+                          }}
+                        >
+                          <div className="flex items-center gap-1.5 truncate">
+                            <span className="text-[10px]">
+                              {bClip.displayMode === 'pip'
+                                ? '📺'
+                                : bClip.displayMode === 'split_screen'
+                                ? '🌗'
+                                : bClip.displayMode === 'blend_overlay'
+                                ? '✨'
+                                : '🎬'}
+                            </span>
+                            <span className="truncate font-bold text-[10px]">
+                              {bClip.name}
+                            </span>
+                            <span className="text-[8px] opacity-75 font-mono">
+                              ({(bClip.endSec - bClip.startSec).toFixed(1)}s)
+                            </span>
+                          </div>
+
+                          {/* Quick Actions on Selected B-Roll clip */}
+                          {isSelected && (
+                            <div className="flex items-center gap-1 shrink-0 ml-1 z-30">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleCycleBRollMode(bClip.id);
+                                }}
+                                className="px-1 py-0.5 rounded bg-black/50 hover:bg-black/70 text-[8px] font-bold text-violet-200 uppercase"
+                                title="Ganti Mode Tampilan (Cutaway, PiP, Split, Blend)"
+                              >
+                                {bClip.displayMode || 'Cut'}
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSplitBRollClip(bClip.id);
+                                }}
+                                className="p-0.5 rounded bg-black/50 hover:bg-violet-500/40 text-violet-200 text-[8px]"
+                                title="Bagi klip B-roll ini di posisi jarum saat ini"
+                              >
+                                <Scissors className="w-2.5 h-2.5" />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setIsBRollModalOpen(true);
+                                }}
+                                className="p-0.5 rounded bg-black/50 hover:bg-violet-500/40 text-violet-200 text-[8px]"
+                                title="Buka Pengaturan Lengkap Klip"
+                              >
+                                <Sliders className="w-2.5 h-2.5" />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteBRollClip(bClip.id);
+                                }}
+                                className="p-0.5 rounded bg-black/50 hover:bg-rose-500/40 text-rose-300 text-[8px]"
+                                title="Hapus Klip B-Roll ini"
+                              >
+                                <Trash2 className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               </div>
+            )}
 
-              {/* ---------------------------------------------------- */}
-              {/* D. TRACK 3: SUBTITLE / LYRIC BLOCKS TRACK             */}
-              {/* ---------------------------------------------------- */}
+            {/* ---------------------------------------------------- */}
+            {/* E. TRACK 3: SUBTITLE / LYRIC BLOCKS TRACK             */}
+            {/* ---------------------------------------------------- */}
+            {trackVisibility.subtitle && (
               <div className="h-11 sm:h-12 relative p-1 flex items-center">
                 <div
                   onClick={() => setSelectedClip('subtitle')}
@@ -1713,10 +3631,25 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
                   )}
                 </div>
               </div>
+            )}
 
-              {/* ---------------------------------------------------- */}
-              {/* E. CAPCUT PLAYHEAD NEEDLE (Jarum Merah/Cyan)          */}
-              {/* ---------------------------------------------------- */}
+            {/* If all tracks are hidden */}
+            {hiddenTracksCount === 4 && (
+              <div className="h-44 flex flex-col items-center justify-center gap-2 text-slate-400 select-none">
+                <EyeOff className="w-8 h-8 text-slate-500 stroke-[1.5]" />
+                <span className="text-xs font-semibold">Semua baris media disembunyikan</span>
+                <button
+                  onClick={showAllTracks}
+                  className="px-3 py-1 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-400/30 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                >
+                  Tampilkan Semua Baris
+                </button>
+              </div>
+            )}
+
+            {/* ---------------------------------------------------- */}
+            {/* E. CAPCUT PLAYHEAD NEEDLE (Jarum Merah/Cyan)          */}
+            {/* ---------------------------------------------------- */}
               <div
                 className="absolute top-0 bottom-0 pointer-events-none z-30"
                 style={{ left: `${playheadPercent}%` }}
@@ -1824,6 +3757,79 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
         duration={effectiveDuration}
         onApplySlides={handleApplyAiSlides}
       />
+
+      {/* B-Roll Modal */}
+      <BRollModal
+        isOpen={isBRollModalOpen}
+        onClose={() => setIsBRollModalOpen(false)}
+        backgroundConfig={backgroundConfig}
+        onBackgroundChange={onBackgroundChange}
+        currentTime={currentTime}
+        duration={effectiveDuration}
+        lyrics={subtitleConfig.lyrics || []}
+        initialTab={bRollModalTab}
+        onSeek={(sec) => {
+          globalAudioEngine.seek(sec);
+        }}
+      />
+
+      {/* AI Camera Effects Director Modal */}
+      <AiVisualEffectsModal
+        isOpen={isAiEffectModalOpen}
+        onClose={() => setIsAiEffectModalOpen(false)}
+        slides={backgroundConfig.multiImageSlides || []}
+        lyrics={subtitleConfig.lyrics || []}
+        duration={effectiveDuration}
+        onApplyEffects={(updatedSlides) => {
+          onBackgroundChange({
+            ...backgroundConfig,
+            type: 'multi_image',
+            multiImageSlides: updatedSlides,
+          });
+          const count = updatedSlides.filter((s) => s.visualEffect && s.visualEffect !== 'none').length;
+          setStatusMessage(`✨ Berhasil memasang efek kamera AI ke ${count} frame!`);
+        }}
+        onClearAllEffects={() => {
+          if (backgroundConfig.multiImageSlides) {
+            const cleared = backgroundConfig.multiImageSlides.map((s) => ({
+              ...s,
+              visualEffect: 'none' as VisualEffectType,
+            }));
+            onBackgroundChange({
+              ...backgroundConfig,
+              multiImageSlides: cleared,
+            });
+          }
+          setStatusMessage('🗑️ Semua efek kamera frame dihapus.');
+        }}
+      />
+
+      {/* ZIP Extraction Progress Modal */}
+      {isExtractingZip && (
+        <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-[#0b101d] border border-amber-500/40 rounded-2xl p-6 max-w-sm w-full shadow-2xl space-y-4 text-center">
+            <div className="w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center mx-auto text-amber-400">
+              <FolderArchive className="w-7 h-7 animate-pulse" />
+            </div>
+            <div>
+              <h4 className="text-white font-bold text-base">Mengekstrak Media dari ZIP</h4>
+              <p className="text-xs text-slate-300 mt-1 min-h-[1.5rem] truncate">
+                {zipProgress.message || 'Mempersiapkan ekstraksi...'}
+              </p>
+            </div>
+            <div className="w-full bg-slate-800/80 rounded-full h-2.5 overflow-hidden border border-white/10">
+              <div
+                className="bg-gradient-to-r from-amber-400 via-yellow-400 to-emerald-400 h-full transition-all duration-200"
+                style={{ width: `${Math.min(100, Math.max(5, zipProgress.percent))}%` }}
+              />
+            </div>
+            <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+              <span>Status: Ekstrak arsip</span>
+              <span className="text-amber-400 font-bold">{zipProgress.percent}%</span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

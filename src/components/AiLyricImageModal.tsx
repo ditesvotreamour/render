@@ -11,6 +11,7 @@ import {
   Loader2,
   RefreshCw,
   Repeat,
+  Video,
 } from 'lucide-react';
 import type { LyricSegment, SlideItem } from '../types/visualizer';
 import {
@@ -18,6 +19,7 @@ import {
   groqLlmMatchImagesToLyrics,
 } from '../utils/aiLyricImageMatcher';
 import type { MatchResult } from '../utils/aiLyricImageMatcher';
+import { isVideoMedia } from '../utils/zipImageExtractor';
 
 interface AiLyricImageModalProps {
   isOpen: boolean;
@@ -43,22 +45,30 @@ export const AiLyricImageModal: React.FC<AiLyricImageModalProps> = ({
     return localStorage.getItem('groq_api_key') || '';
   });
   const [allowReffReuse, setAllowReffReuse] = useState<boolean>(true);
+  const [fillGaps, setFillGaps] = useState<boolean>(true);
+  const [gapInterval, setGapInterval] = useState<number>(4.5);
 
-  // Run initial matching whenever modal opens or images/lyrics/allowReffReuse change
+  // Run initial matching whenever modal opens or options change
   useEffect(() => {
     if (isOpen && images.length > 0) {
       setGroqError(null);
-      const results = heuristicMatchImagesToLyrics(images, lyrics, duration, allowReffReuse);
+      const results = heuristicMatchImagesToLyrics(images, lyrics, duration, allowReffReuse, {
+        enabled: fillGaps,
+        slideIntervalSec: gapInterval,
+      });
       setMatchResults(results);
     }
-  }, [isOpen, images, lyrics, duration, allowReffReuse]);
+  }, [isOpen, images, lyrics, duration, allowReffReuse, fillGaps, gapInterval]);
 
   if (!isOpen) return null;
 
   // Run offline heuristic match
   const handleRunHeuristic = () => {
     setGroqError(null);
-    const results = heuristicMatchImagesToLyrics(images, lyrics, duration, allowReffReuse);
+    const results = heuristicMatchImagesToLyrics(images, lyrics, duration, allowReffReuse, {
+      enabled: fillGaps,
+      slideIntervalSec: gapInterval,
+    });
     setMatchResults(results);
   };
 
@@ -74,7 +84,10 @@ export const AiLyricImageModal: React.FC<AiLyricImageModalProps> = ({
     setGroqError(null);
 
     try {
-      const results = await groqLlmMatchImagesToLyrics(key, images, lyrics, duration, allowReffReuse);
+      const results = await groqLlmMatchImagesToLyrics(key, images, lyrics, duration, allowReffReuse, {
+        enabled: fillGaps,
+        slideIntervalSec: gapInterval,
+      });
       setMatchResults(results);
     } catch (err: any) {
       setGroqError(err?.message || 'Gagal menjalankan analisis Groq AI');
@@ -134,12 +147,49 @@ export const AiLyricImageModal: React.FC<AiLyricImageModalProps> = ({
         <div className="px-5 py-3 bg-slate-900/80 border-b border-white/5 flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2">
             <span className="text-slate-400 font-medium">
-              Foto terdeteksi: <strong className="text-white">{images.length}</strong> | Lirik:{' '}
+              Media terdeteksi: <strong className="text-white">{images.length}</strong> | Lirik:{' '}
               <strong className="text-white">{lyrics.length} baris</strong>
+              {matchResults.filter((r) => r.isFilenameTimestamp).length > 0 && (
+                <span className="ml-1.5 px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-[11px] font-semibold inline-flex items-center gap-1">
+                  <Clock className="w-3 h-3 text-cyan-400" />
+                  <span>{matchResults.filter((r) => r.isFilenameTimestamp).length} dari nama file</span>
+                </span>
+              )}
             </span>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {/* Smart Gap Filler Toggle */}
+            <button
+              onClick={() => setFillGaps(!fillGaps)}
+              className={`px-3 py-1.5 rounded-lg border font-semibold flex items-center gap-1.5 transition-all active:scale-95 ${
+                fillGaps
+                  ? 'bg-amber-500/25 hover:bg-amber-500/35 border-amber-500/50 text-amber-200 shadow-sm'
+                  : 'bg-white/5 hover:bg-white/10 text-slate-400 border-white/10'
+              }`}
+              title="Secara otomatis memecah jeda musik/intro/interlude yang panjang menjadi foto bergantian agar tidak monoton"
+            >
+              <Zap className={`w-3.5 h-3.5 ${fillGaps ? 'text-amber-400' : 'text-slate-500'}`} />
+              <span>Isi Jeda Intro/Solo: <strong className={fillGaps ? 'text-white' : 'text-slate-400'}>{fillGaps ? 'ON' : 'OFF'}</strong></span>
+            </button>
+
+            {fillGaps && (
+              <div className="flex items-center gap-1 bg-black/40 border border-white/10 rounded-lg px-2 py-1 text-[11px]" title="Durasi foto saat jeda instrumental">
+                <span className="text-slate-400">Jeda:</span>
+                {[3.5, 4.5, 6].map((sec) => (
+                  <button
+                    key={sec}
+                    onClick={() => setGapInterval(sec)}
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-mono transition-colors ${
+                      gapInterval === sec ? 'bg-amber-500/30 text-amber-300 font-bold' : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {sec}s
+                  </button>
+                ))}
+              </div>
+            )}
+
             <button
               onClick={() => setAllowReffReuse(!allowReffReuse)}
               className={`px-3 py-1.5 rounded-lg border font-semibold flex items-center gap-1.5 transition-all active:scale-95 ${
@@ -223,14 +273,23 @@ export const AiLyricImageModal: React.FC<AiLyricImageModalProps> = ({
                     key={idx}
                     className="p-3 rounded-xl bg-white/[0.03] hover:bg-white/[0.06] border border-white/10 transition-all flex flex-col sm:flex-row items-start sm:items-center gap-3.5"
                   >
-                    {/* Thumbnail & Image Info */}
+                    {/* Thumbnail & Image/Video Info */}
                     <div className="flex items-center gap-3 w-full sm:w-56 shrink-0">
                       <div className="relative w-14 h-14 rounded-lg overflow-hidden border border-white/20 shrink-0 bg-slate-800">
-                        <img
-                          src={res.slide.url}
-                          alt={res.cleanName}
-                          className="w-full h-full object-cover"
-                        />
+                        {isVideoMedia(res.slide.url, res.slide.mediaType) ? (
+                          <>
+                            <video src={res.slide.url} className="w-full h-full object-cover pointer-events-none" muted playsInline />
+                            <div className="absolute top-0.5 left-0.5 bg-black/70 px-1 py-0.5 rounded text-[8px] text-cyan-300 flex items-center">
+                              <Video className="w-2.5 h-2.5" />
+                            </div>
+                          </>
+                        ) : (
+                          <img
+                            src={res.slide.url}
+                            alt={res.cleanName}
+                            className="w-full h-full object-cover pointer-events-none"
+                          />
+                        )}
                         <span className="absolute bottom-0 right-0 px-1 py-0.5 bg-black/70 text-[9px] font-mono text-cyan-300 rounded-tl">
                           #{idx + 1}
                         </span>
@@ -258,10 +317,24 @@ export const AiLyricImageModal: React.FC<AiLyricImageModalProps> = ({
                             {Math.round(res.confidence)}% Match
                           </span>
 
+                          {res.isFilenameTimestamp && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-cyan-500/25 text-cyan-300 border border-cyan-500/40 flex items-center gap-1">
+                              <Clock className="w-2.5 h-2.5 text-cyan-400" />
+                              <span>Timestamp File</span>
+                            </span>
+                          )}
+
                           {res.isReffRepeat && (
                             <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-indigo-500/25 text-indigo-300 border border-indigo-500/40 flex items-center gap-1">
                               <Repeat className="w-2.5 h-2.5" />
                               <span>Reff #{res.repeatOccurrence || 2}</span>
+                            </span>
+                          )}
+
+                          {(res.reason.includes('Intro') || res.reason.includes('Interlude') || res.reason.includes('Outro')) && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-amber-500/25 text-amber-300 border border-amber-500/40 flex items-center gap-1">
+                              <Zap className="w-2.5 h-2.5 text-amber-400" />
+                              <span>{res.reason.includes('Intro') ? 'Intro Musik' : res.reason.includes('Outro') ? 'Outro Musik' : 'Interlude / Solo'}</span>
                             </span>
                           )}
                         </div>

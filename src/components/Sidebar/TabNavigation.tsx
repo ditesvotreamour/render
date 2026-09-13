@@ -17,7 +17,7 @@ import type {
   ParticlesConfig,
   TypographyConfig,
   SubtitleConfig,
-  SpecterrPreset,
+  BeatFlowPreset,
   EffectsConfig,
   AudioTrack,
 } from '../../types/visualizer';
@@ -61,7 +61,7 @@ interface TabNavigationProps {
   onEffectsChange: (val: EffectsConfig) => void;
   onOpenWhisperModal: () => void;
   onOpenSubtitleEditor?: () => void;
-  onSelectPreset: (preset: SpecterrPreset) => void;
+  onSelectPreset: (preset: BeatFlowPreset) => void;
 }
 
 export const TabNavigation: React.FC<TabNavigationProps> = ({

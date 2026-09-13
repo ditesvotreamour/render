@@ -185,8 +185,47 @@ export type BackgroundType =
   | 'multi_image'
   | 'solid_color';
 
-export interface SlideItem {
+export interface FrameSequenceConfig {
+  urlPattern: string; // e.g. "http://127.0.0.1:8080/frames/frame_%06d.jpg"
+  fps: number;
+  frameCount: number;
+}
+
+export type VisualEffectType =
+  | 'none'
+  | 'distortion'       // Efek Distorsi (Glitch RGB Split & Lens Warp)
+  | 'vintage_camera'   // Efek Kamera Jadul (Retro 8mm, Sepia, Vignette Flicker & Jitter)
+  | 'film_worms'       // Efek Cacing-cacing (Old Film Worms & Hairs Scratches)
+  | 'vintage_worms'    // Kombinasi: Kamera Jadul + Cacing-cacing
+  | 'all';             // Semua Kombinasi: Distorsi + Jadul + Cacing
+
+export interface TimelineFxClip {
   id: string;
+  name?: string;
+  startSec: number;
+  endSec: number;
+  effect: VisualEffectType;
+  intensity?: number; // 0.1 to 1.0 (default 0.75)
+}
+
+export const VISUAL_EFFECT_OPTIONS: Array<{
+  id: VisualEffectType;
+  label: string;
+  shortLabel: string;
+  icon: string;
+  desc: string;
+  badgeClass: string;
+}> = [
+  { id: 'none', label: 'Tanpa Efek', shortLabel: 'Normal', icon: '⚪', desc: 'Gambar/video tampil jernih standar', badgeClass: 'bg-slate-800 text-slate-400 border-white/10' },
+  { id: 'distortion', label: '⚡ Distorsi (Glitch & RGB Split)', shortLabel: '⚡ Distorsi', icon: '⚡', desc: 'Pergeseran irisan piksel glitch, wave warp, dan dispersi warna RGB', badgeClass: 'bg-amber-500/25 text-amber-300 border-amber-500/40 shadow-sm shadow-amber-500/20' },
+  { id: 'vintage_camera', label: '📼 Kamera Jadul (8mm & Flicker)', shortLabel: '📼 Kamera Jadul', icon: '📼', desc: 'Grading warna sepia vintage, kedipan proyektor, goyangan film gate weave & vignette', badgeClass: 'bg-orange-500/25 text-orange-200 border-orange-500/40 shadow-sm shadow-orange-500/20' },
+  { id: 'film_worms', label: '🐛 Cacing-cacing (Film Worms & Scratches)', shortLabel: '🐛 Cacing Film', icon: '🐛', desc: 'Serat debu & bulu meliuk-liuk seperti cacing di layar proyektor seluloid tua dan goresan vertikal', badgeClass: 'bg-emerald-500/25 text-emerald-200 border-emerald-500/40 shadow-sm shadow-emerald-500/20' },
+  { id: 'vintage_worms', label: '🎬 Jadul + Cacing-cacing', shortLabel: '🎬 Jadul+Cacing', icon: '🎬', desc: 'Kombinasi lengkap film jadul retro 8mm dan animasi cacing serat debu', badgeClass: 'bg-lime-500/25 text-lime-200 border-lime-500/40 shadow-sm shadow-lime-500/20' },
+  { id: 'all', label: '💥 Semua Efek (Distorsi + Jadul + Cacing)', shortLabel: '💥 FX Komplit', icon: '💥', desc: 'Kombinasi maksimal: distorsi glitch cyberpunk + kamera vintage + cacing film', badgeClass: 'bg-purple-500/25 text-purple-200 border-purple-500/40 shadow-sm shadow-purple-500/20' },
+];
+
+export interface SlideItem {
+  id?: string;
   url: string;
   name: string; // original filename e.g. "hujan_malam"
   startSec: number;
@@ -194,6 +233,40 @@ export interface SlideItem {
   matchedLyricId?: string;
   matchedLyricText?: string;
   confidence?: number;
+  mediaType?: 'image' | 'video';
+  frameSequence?: FrameSequenceConfig;
+  visualEffect?: VisualEffectType;
+  visualEffectIntensity?: number;
+}
+
+export type BRollDisplayMode = 'cutaway' | 'pip' | 'split_screen' | 'blend_overlay';
+export type BRollPipPosition = 'top_right' | 'top_left' | 'bottom_right' | 'bottom_left' | 'center';
+
+export interface BRollClip {
+  id: string;
+  url: string;
+  name: string;
+  startSec: number;
+  endSec: number;
+  mediaType?: 'image' | 'video';
+  displayMode?: BRollDisplayMode;
+  pipPosition?: BRollPipPosition;
+  pipScale?: number; // 0.15 to 0.6 (default 0.32)
+  opacity?: number; // 0 to 1 (default 1)
+  blendMode?: string; // 'source-over', 'screen', 'lighten', 'overlay', etc.
+  transition?: 'fade' | 'zoom' | 'slide' | 'cut';
+  kenBurns?: boolean;
+  frameSequence?: FrameSequenceConfig;
+  visualEffect?: VisualEffectType;
+  visualEffectIntensity?: number;
+}
+
+export interface BRollConfig {
+  enabled: boolean;
+  clips: BRollClip[];
+  defaultDisplayMode?: BRollDisplayMode;
+  defaultPipPosition?: BRollPipPosition;
+  globalOpacity?: number;
 }
 
 export interface BackgroundConfig {
@@ -204,6 +277,9 @@ export interface BackgroundConfig {
   multiImageInterval?: number; // seconds between images (fallback when slides not explicitly timed)
   multiImageTransition?: 'fade' | 'fade_black' | 'zoom' | 'slide' | 'cut';
   multiImageKenBurns?: boolean;
+  videoFrameSequence?: FrameSequenceConfig;
+  bRoll?: BRollConfig;
+  timelineFxClips?: TimelineFxClip[];
   solidColor: string;
   dimOpacity: number; // 0 to 1
   blur: number; // 0 to 20
@@ -374,6 +450,7 @@ export interface SubtitleConfig {
   translationFontSize?: number;
   maxWordsPerLine?: number; // 2 to 8 words per chunk for kinetic captions
   autoWrapWidth?: number; // 0.6 to 0.95 (% of canvas width)
+  singleLineSentenceMode?: boolean; // Tampil 1 baris per kalimat menyambung tanpa bertabrakan
   wordSpacing?: number; // Extra spacing between words in pixels (-10 to 60)
   // Emotive Text Highlighting / POWER WORDS
   powerWordsEnabled?: boolean;
@@ -445,7 +522,7 @@ export interface EffectsConfig {
   };
 }
 
-export interface SpecterrPreset {
+export interface BeatFlowPreset {
   id: string;
   name: string;
   category:
@@ -465,6 +542,8 @@ export interface SpecterrPreset {
   subtitle?: SubtitleConfig;
   effects?: EffectsConfig;
 }
+
+export type SpecterrPreset = BeatFlowPreset;
 
 export interface AudioTrack {
   id: string;

@@ -13,6 +13,8 @@ import {
   FastForward,
   Rewind,
   Crosshair,
+  Download,
+  Sparkles,
 } from 'lucide-react';
 import type { LyricSegment, SubtitleConfig, AudioTrack } from '../types/visualizer';
 import { globalAudioEngine } from '../utils/audioEngine';
@@ -127,6 +129,28 @@ export const SubtitleEditorModal: React.FC<SubtitleEditorModalProps> = ({
     setTimeout(() => setIsSavedRecently(false), 3000);
   };
 
+  const handleExportSrt = () => {
+    if (lyrics.length === 0) {
+      showNotification('⚠️ Tidak ada baris lirik untuk disimpan ke format .SRT!');
+      return;
+    }
+    const srt = WhisperAIService.exportToSrt(lyrics);
+    const blob = new Blob([srt], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safeTitle = (currentTrack?.title || 'lirik')
+      .replace(/[^a-zA-Z0-9_\-\s]/g, '')
+      .trim()
+      .replace(/\s+/g, '_');
+    a.download = `${safeTitle || 'lirik'}.srt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showNotification(`💾 File lirik .SRT (${lyrics.length} baris) berhasil disimpan!`);
+  };
+
   const formatTime = (sec: number): string => {
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60);
@@ -229,6 +253,13 @@ export const SubtitleEditorModal: React.FC<SubtitleEditorModalProps> = ({
     const shifted = WhisperAIService.shiftLyricTimestamps(lyrics, seconds);
     updateLyrics(shifted);
     showNotification(`⏱️ Semua timestamp digeser ${seconds > 0 ? '+' : ''}${seconds}s`);
+  };
+
+  const handleReconstructBySentence = () => {
+    if (lyrics.length === 0) return;
+    const reconstructed = WhisperAIService.reconstructSubtitlesBySentence(lyrics);
+    updateLyrics(reconstructed);
+    showNotification(`✨ ${reconstructed.length} kalimat berhasil disusun rapi satu baris & anti-tabrakan!`);
   };
 
   const handleSearchReplace = () => {
@@ -460,6 +491,29 @@ export const SubtitleEditorModal: React.FC<SubtitleEditorModalProps> = ({
             >
               <span className={`w-2 h-2 rounded-full ${subtitle.enabled ? 'bg-cyan-400 animate-pulse' : 'bg-rose-400'}`} />
               <span>{subtitle.enabled ? 'Tampil di Video: ON' : 'Tampil di Video: OFF'}</span>
+            </button>
+
+            {/* Tombol Susun Per Kalimat (Satu Baris) */}
+            <button
+              onClick={handleReconstructBySentence}
+              disabled={lyrics.length === 0}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold text-xs bg-gradient-to-r from-amber-500/20 via-orange-500/20 to-amber-600/20 hover:from-amber-500/30 hover:to-orange-500/30 border border-amber-500/40 text-amber-300 transition-all shadow-sm active:scale-95 disabled:opacity-40"
+              title="Susun subtitle per kalimat utuh (berdasarkan tanda baca) agar tampil 1 baris & menyambung tanpa bertabrakan"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden md:inline">✨ Susun Per Kalimat (Satu Baris)</span>
+              <span className="md:hidden">✨ Per Kalimat</span>
+            </button>
+
+            {/* Tombol Simpan Lirik .SRT */}
+            <button
+              onClick={handleExportSrt}
+              disabled={lyrics.length === 0}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold text-xs bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 hover:border-cyan-400 text-cyan-300 transition-all shadow-sm active:scale-95 disabled:opacity-40"
+              title="Simpan / Download Lirik dalam Format SubRip (.SRT)"
+            >
+              <Download className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Simpan .SRT</span>
             </button>
 
             {/* Tombol Simpan Subtitle di Header */}
@@ -759,6 +813,16 @@ export const SubtitleEditorModal: React.FC<SubtitleEditorModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2 self-end sm:self-auto">
+            <button
+              onClick={handleExportSrt}
+              disabled={lyrics.length === 0}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 hover:border-cyan-400 text-cyan-300 font-bold text-xs shadow-sm transition-all active:scale-95 disabled:opacity-40"
+              title="Simpan / Download Lirik dalam Format SubRip (.SRT)"
+            >
+              <Download className="w-4 h-4 text-cyan-400" />
+              <span>Simpan .SRT</span>
+            </button>
+
             <button
               onClick={handleSaveSubtitle}
               className={`flex items-center gap-1.5 px-4 py-2 rounded-xl font-bold text-xs shadow-lg transition-all active:scale-95 ${

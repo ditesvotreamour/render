@@ -93,7 +93,7 @@ export const SafeZoneOverlay: React.FC<SafeZoneOverlayProps> = ({
           <div className="pr-14 pb-2 space-y-1.5 text-white drop-shadow">
             <div className="text-xs font-bold">@musicproducer</div>
             <p className="text-[10px] text-white/90 line-clamp-2 leading-tight">
-              New track out now! 🔥🎧 Visualizer rendered with Specterr Studio #music #producer #beats
+              New track out now! 🔥🎧 Visualizer rendered with BeatFlow Studio #music #producer #beats
             </p>
             <div className="flex items-center gap-1.5 text-[10px] text-white/80">
               <Music2 className="w-3 h-3" />

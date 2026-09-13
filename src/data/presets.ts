@@ -1,6 +1,6 @@
-import type { SpecterrPreset } from '../types/visualizer';
+import type { BeatFlowPreset } from '../types/visualizer';
 
-export const SPECTERR_PRESETS: SpecterrPreset[] = [
+export const BEATFLOW_PRESETS: BeatFlowPreset[] = [
   {
     id: 'ncs-electro-glow',
     name: 'NCS Electro Glow',
@@ -1024,4 +1024,6 @@ export const SPECTERR_PRESETS: SpecterrPreset[] = [
     },
   },
 ];
+
+export const SPECTERR_PRESETS = BEATFLOW_PRESETS;
 

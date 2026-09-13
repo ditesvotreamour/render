@@ -10,10 +10,10 @@ import type {
   AspectRatio,
   PreviewResolution,
   AudioTrack,
-  SpecterrPreset,
+  BeatFlowPreset,
   EffectsConfig,
 } from './types/visualizer';
-import { SPECTERR_PRESETS } from './data/presets';
+import { BEATFLOW_PRESETS } from './data/presets';
 import { SAMPLE_TRACKS } from './data/sampleTracks';
 import { DEFAULT_EFFECTS_CONFIG } from './constants/defaultEffects';
 import { globalAudioEngine } from './utils/audioEngine';
@@ -33,24 +33,26 @@ import { saveProjectLocally, loadProjectLocally } from './utils/projectStorage';
 import type { StoredTrackItem } from './utils/idb';
 
 export function App() {
-  const initialPreset = SPECTERR_PRESETS[0];
+  const initialPreset = BEATFLOW_PRESETS[0];
 
   // Studio State
   const [currentPresetId, setCurrentPresetId] = useState<string>(initialPreset.id);
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9');
   const [previewResolution, setPreviewResolution] = useState<PreviewResolution>(() => {
-    const saved = localStorage.getItem('specterr_preview_resolution');
+    const saved = localStorage.getItem('beatflow_preview_resolution') || localStorage.getItem('specterr_preview_resolution');
     if (saved === '1080p' || saved === '720p' || saved === '480p' || saved === '360p') {
       return saved as PreviewResolution;
     }
-    const legacy = localStorage.getItem('specterr_preview_quality');
+    const legacy = localStorage.getItem('beatflow_preview_quality') || localStorage.getItem('specterr_preview_quality');
     if (legacy === 'high') return '1080p';
-    return '720p';
+    if (legacy === 'medium') return '720p';
+    if (legacy === 'low') return '480p';
+    return '1080p';
   });
 
   const handlePreviewResolutionChange = (res: PreviewResolution) => {
     setPreviewResolution(res);
-    localStorage.setItem('specterr_preview_resolution', res);
+    localStorage.setItem('beatflow_preview_resolution', res);
   };
 
   // Customization Configurations (Default: completely blank canvas on new start, all effects OFF)
@@ -725,7 +727,7 @@ export function App() {
     }
   };
 
-  const handleApplyPreset = (preset: SpecterrPreset) => {
+  const handleApplyPreset = (preset: BeatFlowPreset) => {
     setCurrentPresetId(preset.id);
     setVisualizerConfig(preset.visualizer);
     setCenterLogoConfig((prev) => ({
@@ -869,6 +871,10 @@ export function App() {
               duration={duration}
               canvasRefCallback={handleCanvasRef}
               onTogglePlay={handleTogglePlay}
+              onSubtitleChange={handleSubtitleChange}
+              onSeek={(time) => globalAudioEngine.seek(time)}
+              onOpenSubtitleEditor={() => setIsSubtitleEditorOpen(true)}
+              onSave={handleManualSave}
             />
           </div>
 

@@ -35,9 +35,11 @@ import type {
   EffectsConfig,
   AudioTrack,
   SlideItem,
+  BRollClip,
 } from '../types/visualizer';
 import { globalVideoExporter } from '../utils/videoExporter';
 import { GitHubRendererService, type GitHubWorkflowRun } from '../utils/githubRenderer';
+import { isVideoMedia } from '../utils/zipImageExtractor';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -324,16 +326,36 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         }
       }
 
-      // 3. Upload background images if blob URLs (deduplicated by URL)
+      // 3. Upload background images/videos if blob URLs (deduplicated by URL)
       let preparedBg: BackgroundConfig = background ? { ...background } : ({} as any);
       const uploadedBlobMap = new Map<string, string>();
-      const getOrUploadImage = async (blobUrl: string, prefix: string): Promise<string> => {
+      const getOrUploadImage = async (blobUrl: string, prefix: string, mediaTypeHint?: 'image' | 'video'): Promise<string> => {
         if (!blobUrl || !blobUrl.startsWith('blob:')) return blobUrl;
         if (uploadedBlobMap.has(blobUrl)) {
           return uploadedBlobMap.get(blobUrl)!;
         }
+        const isVid = isVideoMedia(blobUrl, mediaTypeHint);
+        if (isVid) {
+          const res = await fetch(blobUrl);
+          const blob = await res.blob();
+          const base64 = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+          const uploadedPath = await GitHubRendererService.uploadMediaToRepo(
+            githubRepo,
+            githubToken,
+            prefix,
+            base64,
+            'mp4'
+          );
+          uploadedBlobMap.set(blobUrl, uploadedPath);
+          return uploadedPath;
+        }
         const base64 = await GitHubRendererService.compressBlobImage(blobUrl, 1920, 0.85);
-        const uploadedPath = await GitHubRendererService.uploadImageToRepo(
+        const uploadedPath = await GitHubRendererService.uploadMediaToRepo(
           githubRepo,
           githubToken,
           prefix,
@@ -344,12 +366,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       };
 
       if (preparedBg?.type === 'custom_image' && preparedBg.customImageUrl?.startsWith('blob:')) {
-        setGithubStatusMessage('Mengompresi & mengunggah gambar background ke GitHub...');
+        const isVid = isVideoMedia(preparedBg.customImageUrl);
+        setGithubStatusMessage(`Mengunggah ${isVid ? 'video' : 'gambar'} background ke GitHub...`);
         try {
-          preparedBg.customImageUrl = await getOrUploadImage(preparedBg.customImageUrl, 'bg_custom');
+          preparedBg.customImageUrl = await getOrUploadImage(preparedBg.customImageUrl, isVid ? 'bg_video' : 'bg_custom', isVid ? 'video' : 'image');
         } catch (e: any) {
-          console.warn('Background image upload failed:', e);
-          throw new Error(`Gagal mengunggah gambar background ke repository GitHub: ${e.message || e}`);
+          console.warn('Background media upload failed:', e);
+          throw new Error(`Gagal mengunggah media background ke repository GitHub: ${e.message || e}`);
         }
       }
 
@@ -361,14 +384,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           for (let i = 0; i < total; i++) {
             const url = preparedBg.multiImageUrls[i];
             if (url && url.startsWith('blob:')) {
+              const isVid = isVideoMedia(url);
               setGithubStatusMessage(
-                `Mengunggah foto background slideshow (${i + 1}/${total}) ke GitHub...`
+                `Mengunggah ${isVid ? 'video' : 'foto'} background slideshow (${i + 1}/${total}) ke GitHub...`
               );
               try {
-                const slidePath = await getOrUploadImage(url, `slideshow_${i + 1}`);
+                const slidePath = await getOrUploadImage(url, `${isVid ? 'video' : 'slideshow'}_${i + 1}`, isVid ? 'video' : 'image');
                 updatedUrls.push(slidePath);
               } catch (e: any) {
-                console.warn(`Slideshow photo ${i + 1} upload failed:`, e);
+                console.warn(`Slideshow item ${i + 1} upload failed:`, e);
                 updatedUrls.push(url);
               }
             } else {
@@ -384,22 +408,50 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           const total = preparedBg.multiImageSlides.length;
           for (let i = 0; i < total; i++) {
             const slide = preparedBg.multiImageSlides[i];
+            const isVid = isVideoMedia(slide?.url || '', slide?.mediaType);
+            const mediaType: 'image' | 'video' = isVid ? 'video' : 'image';
             if (slide && slide.url && slide.url.startsWith('blob:')) {
               setGithubStatusMessage(
-                `Mengunggah gambar slide lirik (${i + 1}/${total}) ke GitHub...`
+                `Mengunggah ${isVid ? 'video' : 'gambar'} slide (${i + 1}/${total}) ke GitHub...`
               );
               try {
-                const slidePath = await getOrUploadImage(slide.url, `slide_${i + 1}`);
-                updatedSlides.push({ ...slide, url: slidePath });
+                const slidePath = await getOrUploadImage(slide.url, `${isVid ? 'video' : 'slide'}_${i + 1}`, mediaType);
+                updatedSlides.push({ ...slide, url: slidePath, mediaType });
               } catch (e: any) {
                 console.warn(`Slide ${i + 1} upload failed:`, e);
-                updatedSlides.push(slide);
+                updatedSlides.push({ ...slide, mediaType });
               }
             } else {
-              updatedSlides.push(slide);
+              updatedSlides.push({ ...slide, mediaType });
             }
           }
           preparedBg.multiImageSlides = updatedSlides;
+        }
+
+        // Upload bRoll clips if present
+        if (preparedBg.bRoll && Array.isArray(preparedBg.bRoll.clips) && preparedBg.bRoll.clips.length > 0) {
+          const updatedBClips: BRollClip[] = [];
+          const bTotal = preparedBg.bRoll.clips.length;
+          for (let i = 0; i < bTotal; i++) {
+            const bClip = preparedBg.bRoll.clips[i];
+            const isVid = isVideoMedia(bClip?.url || '', bClip?.mediaType);
+            const mediaType: 'image' | 'video' = isVid ? 'video' : 'image';
+            if (bClip && bClip.url && bClip.url.startsWith('blob:')) {
+              setGithubStatusMessage(
+                `Mengunggah ${isVid ? 'video' : 'gambar'} B-roll (${i + 1}/${bTotal}) ke GitHub...`
+              );
+              try {
+                const bPath = await getOrUploadImage(bClip.url, `broll_${isVid ? 'video' : 'clip'}_${i + 1}`, mediaType);
+                updatedBClips.push({ ...bClip, url: bPath, mediaType });
+              } catch (e: any) {
+                console.warn(`B-Roll clip ${i + 1} upload failed:`, e);
+                updatedBClips.push({ ...bClip, mediaType });
+              }
+            } else {
+              updatedBClips.push({ ...bClip, mediaType });
+            }
+          }
+          preparedBg.bRoll.clips = updatedBClips;
         }
       }
 

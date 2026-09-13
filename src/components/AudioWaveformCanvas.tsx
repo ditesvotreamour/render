@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { ZoomIn, ZoomOut, RotateCcw, Volume2 } from 'lucide-react';
+import { ZoomIn, ZoomOut, RotateCcw, Volume2, Scissors } from 'lucide-react';
 import { AudioTrimmerJoiner } from '../utils/audioTrimmerJoiner';
 import type { AudioTrack } from '../types/visualizer';
 
@@ -14,6 +14,8 @@ interface AudioWaveformCanvasProps {
   fadeOutSec?: number;
   onChangeRange: (start: number, end: number) => void;
   onSeek: (sec: number) => void;
+  splitPoints?: number[];
+  onSplitAtPlayhead?: () => void;
 }
 
 export const AudioWaveformCanvas: React.FC<AudioWaveformCanvasProps> = ({
@@ -26,6 +28,8 @@ export const AudioWaveformCanvas: React.FC<AudioWaveformCanvasProps> = ({
   fadeOutSec = 0,
   onChangeRange,
   onSeek,
+  splitPoints = [],
+  onSplitAtPlayhead,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -257,25 +261,57 @@ export const AudioWaveformCanvas: React.FC<AudioWaveformCanvasProps> = ({
     ctx.arc(endX, height - 10, 7, 0, Math.PI * 2);
     ctx.fill();
 
-    // Playhead Scrubber Line
+    // Split Cut Markers (Garis Titik Potongan CapCut)
+    if (splitPoints && splitPoints.length > 0) {
+      splitPoints.forEach((pt) => {
+        const ptX = timeToX(pt, width);
+        if (ptX >= 0 && ptX <= width) {
+          ctx.save();
+          ctx.strokeStyle = '#FBBF24'; // Amber / Gold
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 3]);
+          ctx.beginPath();
+          ctx.moveTo(ptX, 0);
+          ctx.lineTo(ptX, height);
+          ctx.stroke();
+
+          // Split Scissors icon dot
+          ctx.fillStyle = '#FBBF24';
+          ctx.beginPath();
+          ctx.arc(ptX, height / 2, 4, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      });
+    }
+
+    // Playhead Scrubber Line (Garis Jarum Penanda CapCut)
     const curX = timeToX(currentTime, width);
     if (curX >= 0 && curX <= width) {
       ctx.strokeStyle = '#FFFFFF';
       ctx.lineWidth = 2;
       ctx.shadowColor = '#00F0FF';
-      ctx.shadowBlur = 8;
+      ctx.shadowBlur = 10;
       ctx.beginPath();
       ctx.moveTo(curX, 0);
       ctx.lineTo(curX, height);
       ctx.stroke();
       ctx.shadowBlur = 0;
 
-      // Playhead Top Pointer
-      ctx.fillStyle = '#FFFFFF';
+      // Playhead Top Pointer (CapCut Pin)
+      ctx.fillStyle = '#22D3EE';
       ctx.beginPath();
-      ctx.moveTo(curX - 5, 0);
-      ctx.lineTo(curX + 5, 0);
-      ctx.lineTo(curX, 8);
+      ctx.moveTo(curX - 6, 0);
+      ctx.lineTo(curX + 6, 0);
+      ctx.lineTo(curX, 10);
+      ctx.closePath();
+      ctx.fill();
+
+      // Playhead Bottom Pointer
+      ctx.beginPath();
+      ctx.moveTo(curX - 6, height);
+      ctx.lineTo(curX + 6, height);
+      ctx.lineTo(curX, height - 10);
       ctx.closePath();
       ctx.fill();
     }
@@ -286,6 +322,7 @@ export const AudioWaveformCanvas: React.FC<AudioWaveformCanvasProps> = ({
     currentTime,
     fadeInSec,
     fadeOutSec,
+    splitPoints,
     timeToX,
     xToTime,
     effectiveDuration,
@@ -468,9 +505,35 @@ export const AudioWaveformCanvas: React.FC<AudioWaveformCanvasProps> = ({
           className="w-full h-full block cursor-pointer"
         />
 
+        {/* Floating Playhead Needle Indicator with Scissors button (Garis Jarum CapCut) */}
+        <div
+          className="absolute top-1 pointer-events-auto -translate-x-1/2 flex flex-col items-center z-30"
+          style={{
+            left: `${Math.max(
+              0,
+              Math.min(
+                100,
+                ((currentTime - currentScroll) / visibleDuration) * 100
+              )
+            )}%`,
+          }}
+        >
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              if (onSplitAtPlayhead) onSplitAtPlayhead();
+            }}
+            className="px-1.5 py-0.5 rounded bg-cyan-400 hover:bg-cyan-300 text-black font-mono font-black text-[9px] shadow-lg flex items-center gap-1 transition-all transform hover:scale-105 active:scale-95 cursor-pointer"
+            title="Klik untuk memotong/membagi audio di posisi garis ini (CapCut Split)"
+          >
+            <Scissors className="w-2.5 h-2.5" />
+            <span>{formatTime(currentTime)}</span>
+          </button>
+        </div>
+
         {/* Floating Range Tooltips */}
         <div
-          className="absolute top-1.5 pointer-events-none px-2 py-0.5 rounded bg-cyan-500/90 text-black font-mono font-black text-[10px] shadow-md transition-all"
+          className="absolute bottom-1 pointer-events-none px-2 py-0.5 rounded bg-cyan-500/80 text-black font-mono font-black text-[9px] shadow-md transition-all"
           style={{
             left: `${Math.max(
               0,
@@ -485,12 +548,12 @@ export const AudioWaveformCanvas: React.FC<AudioWaveformCanvasProps> = ({
         </div>
 
         <div
-          className="absolute bottom-1.5 pointer-events-none px-2 py-0.5 rounded bg-pink-500/90 text-white font-mono font-black text-[10px] shadow-md transition-all"
+          className="absolute bottom-1 pointer-events-none px-2 py-0.5 rounded bg-pink-500/80 text-white font-mono font-black text-[9px] shadow-md transition-all -translate-x-full"
           style={{
             left: `${Math.max(
-              0,
+              10,
               Math.min(
-                85,
+                100,
                 ((trimEnd - currentScroll) / visibleDuration) * 100
               )
             )}%`,
@@ -503,21 +566,21 @@ export const AudioWaveformCanvas: React.FC<AudioWaveformCanvasProps> = ({
       {/* Interactive Helper Legend */}
       <div className="flex items-center justify-between text-[10px] text-slate-400 px-1 font-mono">
         <div className="flex items-center gap-3">
-          <span className="flex items-center gap-1">
+          <span className="flex items-center gap-1 text-cyan-300 font-semibold">
+            <Scissors className="w-3 h-3 text-cyan-400" />
+            <span>Garis Jarum Penanda (Potong di Sini)</span>
+          </span>
+          <span className="flex items-center gap-1 hidden sm:inline-flex">
             <span className="w-2 h-2 rounded-full bg-cyan-400 inline-block" />
-            <span>Handle Mulai</span>
+            <span>Batas Mulai</span>
           </span>
-          <span className="flex items-center gap-1">
+          <span className="flex items-center gap-1 hidden sm:inline-flex">
             <span className="w-2 h-2 rounded-full bg-pink-400 inline-block" />
-            <span>Handle Selesai</span>
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-white inline-block shadow-sm shadow-cyan-300" />
-            <span>Garis Playhead</span>
+            <span>Batas Selesai</span>
           </span>
         </div>
-        <span className="text-slate-500 hidden sm:inline">
-          💡 Tips: Geser handle atau klik pada gelombang suara untuk mendengar
+        <span className="text-slate-400 text-[10px]">
+          💡 Geser garis atau klik tombol gunting untuk membagi audio jadi 2
         </span>
       </div>
     </div>

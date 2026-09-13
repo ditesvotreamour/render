@@ -46,6 +46,9 @@ export class AudioEngine {
     this._currentTime = val;
   }
   public trimRange: { start: number; end: number } | null = null;
+  public activeSegments: Array<{ start: number; end: number }> | null = null;
+  private segmentMonitorRaf: number | null = null;
+  private isSeekingSegment: boolean = false;
   public stemMode: StemIsolationMode = 'full';
   public lastAnalysis: SongAnalysisResult | null = null;
   public onTimeUpdate: ((time: number, duration: number) => void) | null = null;
@@ -110,7 +113,9 @@ export class AudioEngine {
 
       audio.addEventListener('timeupdate', () => {
         this.currentTime = audio.currentTime;
-        if (this.trimRange && this.isPlaying) {
+        if (this.activeSegments && this.activeSegments.length > 0 && this.isPlaying) {
+          this.checkSegmentsBoundary();
+        } else if (this.trimRange && this.isPlaying) {
           if (this.currentTime >= this.trimRange.end) {
             audio.currentTime = this.trimRange.start;
             this.currentTime = this.trimRange.start;
@@ -122,6 +127,10 @@ export class AudioEngine {
         if (this.onTimeUpdate) {
           this.onTimeUpdate(this.currentTime, this.duration);
         }
+      });
+
+      audio.addEventListener('seeked', () => {
+        this.isSeekingSegment = false;
       });
 
       audio.addEventListener('ended', () => {
@@ -266,6 +275,95 @@ export class AudioEngine {
     }
   }
 
+  private startSegmentMonitor(): void {
+    if (this.segmentMonitorRaf !== null) return;
+    const loop = () => {
+      if (this.isPlaying && this.activeSegments && this.activeSegments.length > 0) {
+        this.checkSegmentsBoundary();
+      }
+      this.segmentMonitorRaf = requestAnimationFrame(loop);
+    };
+    this.segmentMonitorRaf = requestAnimationFrame(loop);
+  }
+
+  private stopSegmentMonitor(): void {
+    if (this.segmentMonitorRaf !== null) {
+      cancelAnimationFrame(this.segmentMonitorRaf);
+      this.segmentMonitorRaf = null;
+    }
+  }
+
+  public setActiveSegments(segments: Array<{ start: number; end: number }> | null): void {
+    if (!segments || segments.length === 0) {
+      this.activeSegments = null;
+      return;
+    }
+    this.activeSegments = [...segments].sort((a, b) => a.start - b.start);
+    if (this.isPlaying) {
+      this.checkSegmentsBoundary();
+    }
+  }
+
+  public checkSegmentsBoundary(): void {
+    if (!this.activeSegments || this.activeSegments.length === 0) return;
+    if (this.isSeekingSegment || (this.audioElement && this.audioElement.seeking)) return;
+
+    const cur = this.audioElement ? this.audioElement.currentTime : this.currentTime;
+    const segs = this.activeSegments;
+
+    // Check if before the very first segment
+    if (cur < segs[0].start - 0.08) {
+      this.isSeekingSegment = true;
+      this.seek(segs[0].start);
+      return;
+    }
+
+    // Check if inside or at the end of any segment
+    let foundInside = false;
+    for (let i = 0; i < segs.length; i++) {
+      const seg = segs[i];
+      if (cur >= seg.start - 0.03 && cur < seg.end - 0.06) {
+        foundInside = true;
+        break;
+      } else if (cur >= seg.end - 0.06 && cur <= seg.end + 0.5) {
+        // Reached end of segment i
+        if (i + 1 < segs.length) {
+          // Instantly jump to next segment start
+          this.isSeekingSegment = true;
+          this.seek(segs[i + 1].start);
+          foundInside = true;
+          break;
+        } else {
+          // Reached end of all segments
+          this.isSeekingSegment = true;
+          this.seek(segs[0].start);
+          this.pause();
+          if (this.onEnded) {
+            this.onEnded();
+          }
+          foundInside = true;
+          break;
+        }
+      }
+    }
+
+    if (!foundInside) {
+      // In a deleted gap between segments or past the end
+      const nextSeg = segs.find((s) => s.start > cur);
+      if (nextSeg) {
+        this.isSeekingSegment = true;
+        this.seek(nextSeg.start);
+      } else {
+        this.isSeekingSegment = true;
+        this.seek(segs[0].start);
+        this.pause();
+        if (this.onEnded) {
+          this.onEnded();
+        }
+      }
+    }
+  }
+
   public async play(): Promise<void> {
     await this.initAudioContext();
 
@@ -276,12 +374,26 @@ export class AudioEngine {
 
     if (this.audioElement) {
       try {
+        // If current position is in a deleted gap, pre-snap to next valid segment before calling play
+        if (this.activeSegments && this.activeSegments.length > 0) {
+          const segs = this.activeSegments;
+          const cur = this.audioElement.currentTime;
+          const inside = segs.some((s) => cur >= s.start - 0.05 && cur < s.end - 0.05);
+          if (!inside) {
+            const nextSeg = segs.find((s) => s.start >= cur) || segs[0];
+            this.audioElement.currentTime = nextSeg.start;
+            this.currentTime = nextSeg.start;
+          }
+        }
+
         await this.audioElement.play();
         this.isPlaying = true;
-      } catch (err) {
-        console.warn('Direct audio play failed, falling back to synth engine:', err);
-        this.setupSynthTrack('synth://edm');
-        this.playSynth();
+        this.startSegmentMonitor();
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          return;
+        }
+        console.warn('Direct audio play failed:', err);
       }
     } else {
       this.setupSynthTrack('synth://edm');
@@ -290,6 +402,8 @@ export class AudioEngine {
   }
 
   public pause(): void {
+    this.stopSegmentMonitor();
+    this.isSeekingSegment = false;
     if (this.audioElement) {
       this.audioElement.pause();
     }
@@ -317,11 +431,31 @@ export class AudioEngine {
   }
 
   public seek(seconds: number): void {
+    if (isNaN(seconds)) return;
+    let target = seconds;
+    if (this.activeSegments && this.activeSegments.length > 0) {
+      const segs = this.activeSegments;
+      const inside = segs.some((s) => target >= s.start && target <= s.end);
+      if (!inside) {
+        const nextSeg = segs.find((s) => s.start >= target);
+        if (nextSeg) {
+          target = nextSeg.start;
+        } else if (target < segs[0].start) {
+          target = segs[0].start;
+        } else if (target > segs[segs.length - 1].end) {
+          target = segs[segs.length - 1].end;
+        }
+      }
+    }
+
     if (this.audioElement && this.duration > 0) {
-      this.audioElement.currentTime = Math.max(0, Math.min(seconds, this.duration));
-      this.currentTime = this.audioElement.currentTime;
+      const clamped = Math.max(0, Math.min(target, this.duration));
+      if (Math.abs(this.audioElement.currentTime - clamped) > 0.04) {
+        this.audioElement.currentTime = clamped;
+      }
+      this.currentTime = clamped;
     } else if (this.synthIsPlaying) {
-      this.synthTime = seconds % 180;
+      this.synthTime = target % 180;
       this.currentTime = this.synthTime;
     }
     if (this.onTimeUpdate) {

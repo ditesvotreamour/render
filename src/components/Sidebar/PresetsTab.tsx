@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { Sparkles, Check, ArrowRight } from 'lucide-react';
-import type { SpecterrPreset } from '../../types/visualizer';
-import { SPECTERR_PRESETS } from '../../data/presets';
+import type { BeatFlowPreset } from '../../types/visualizer';
+import { BEATFLOW_PRESETS } from '../../data/presets';
 
 interface PresetsTabProps {
   currentPresetId: string;
-  onSelectPreset: (preset: SpecterrPreset) => void;
+  onSelectPreset: (preset: BeatFlowPreset) => void;
 }
 
 export const PresetsTab: React.FC<PresetsTabProps> = ({ currentPresetId, onSelectPreset }) => {
@@ -23,8 +23,8 @@ export const PresetsTab: React.FC<PresetsTabProps> = ({ currentPresetId, onSelec
 
   const filteredPresets =
     selectedCategory === 'All'
-      ? SPECTERR_PRESETS
-      : SPECTERR_PRESETS.filter((p) => p.category === selectedCategory);
+      ? BEATFLOW_PRESETS
+      : BEATFLOW_PRESETS.filter((p) => p.category === selectedCategory);
 
   return (
     <div className="space-y-4 pb-12">

@@ -7,9 +7,29 @@ import {
   Flame,
   Star,
   Zap,
+  FolderArchive,
+  Video,
+  Film,
+  Wand2,
+  Trash2,
 } from 'lucide-react';
-import type { BackgroundConfig, ParticlesConfig, BackgroundType, ParticleType, LyricSegment, SlideItem } from '../../types/visualizer';
+import type { BackgroundConfig, ParticlesConfig, BackgroundType, ParticleType, LyricSegment, SlideItem, VisualEffectType } from '../../types/visualizer';
+import { VISUAL_EFFECT_OPTIONS } from '../../types/visualizer';
 import { AiLyricImageModal } from '../AiLyricImageModal';
+import { BRollModal } from '../BRollModal';
+import { StockMediaModal } from '../StockMediaModal';
+import { AiVisualEffectsModal } from '../AiVisualEffectsModal';
+import type { StockMediaItem } from '../../utils/stockMediaService';
+import {
+  isZipFile,
+  isZipBlob,
+  processFilesWithZipExtraction,
+  isVideoMedia,
+  registerMediaUrl,
+  isVideoFile,
+  getMediaUrlType,
+} from '../../utils/zipImageExtractor';
+import { heuristicMatchImagesToLyrics } from '../../utils/aiLyricImageMatcher';
 
 interface BackgroundTabProps {
   bgConfig: BackgroundConfig;
@@ -27,8 +47,8 @@ const BG_PRESETS: { id: BackgroundType; label: string; desc: string }[] = [
   { id: 'preset_cyber_tunnel', label: 'Matrix Tunnel', desc: 'Expanding concentric green wireframe rings' },
   { id: 'preset_aurora', label: 'Aurora Shockwave', desc: 'Fiery crimson & amber audio-reactive glow curtains' },
   { id: 'preset_dark_studio', label: 'Dark Studio', desc: 'Luxury dark vignette with subtle lighting' },
-  { id: 'custom_image', label: 'Custom Image', desc: 'Upload your own wallpaper, banner or cover art' },
-  { id: 'multi_image', label: 'Slideshow Multi-Background', desc: 'Add multiple images that transition during the music' },
+  { id: 'custom_image', label: 'Custom Media', desc: 'Upload wallpaper, video, banner or cover art' },
+  { id: 'multi_image', label: 'Slideshow Multi-Media', desc: 'Add multiple photos & videos that transition during music' },
 ];
 
 const PARTICLE_TYPES: { id: ParticleType; label: string; icon: React.ReactNode }[] = [
@@ -48,8 +68,14 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const multiFileInputRef = useRef<HTMLInputElement>(null);
+  const zipFileInputRef = useRef<HTMLInputElement>(null);
+  const [isBRollModalOpen, setIsBRollModalOpen] = useState<boolean>(false);
+  const [isStockModalOpen, setIsStockModalOpen] = useState<boolean>(false);
   const [showAiModal, setShowAiModal] = useState<boolean>(false);
-  const [storedImages, setStoredImages] = useState<Array<{ url: string; name: string }>>([]);
+  const [isAiEffectModalOpen, setIsAiEffectModalOpen] = useState<boolean>(false);
+  const [storedImages, setStoredImages] = useState<Array<{ url: string; name: string; mediaType?: 'image' | 'video' }>>([]);
+  const [isExtractingZip, setIsExtractingZip] = useState<boolean>(false);
+  const [zipProgress, setZipProgress] = useState<{ percent: number; message: string }>({ percent: 0, message: '' });
 
   const updateBg = (partial: Partial<BackgroundConfig>) => {
     onBgChange({ ...bgConfig, ...partial });
@@ -59,25 +85,108 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
     onParticlesChange({ ...particlesConfig, ...partial });
   };
 
+  const handleSelectStockForBackground = (item: StockMediaItem) => {
+    registerMediaUrl(item.downloadUrl, item.type);
+    updateBg({
+      customImageUrl: item.downloadUrl,
+      type: 'custom_image',
+    });
+    setIsStockModalOpen(false);
+  };
+
+  const handleSelectStockForSlide = (item: StockMediaItem) => {
+    registerMediaUrl(item.downloadUrl, item.type);
+    const existingSlides = bgConfig.multiImageSlides || [];
+    const lastEnd = existingSlides.length > 0 ? existingSlides[existingSlides.length - 1].endSec : 0;
+    const dur = item.duration && item.duration > 0 ? item.duration : 5;
+    const newSlide: SlideItem = {
+      id: `slide_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      name: item.title,
+      url: item.downloadUrl,
+      mediaType: item.type,
+      startSec: lastEnd,
+      endSec: Math.min(duration, lastEnd + dur),
+    };
+    updateBg({
+      type: 'multi_image',
+      multiImageSlides: [...existingSlides, newSlide],
+      multiImageUrls: [...(bgConfig.multiImageUrls || []), item.downloadUrl],
+    });
+  };
+
   const handleCustomImage = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
       const url = URL.createObjectURL(file);
+      const mediaType = isVideoFile(file) ? 'video' : 'image';
+      registerMediaUrl(url, mediaType);
       updateBg({ customImageUrl: url, type: 'custom_image' });
+    }
+  };
+
+  const processImageFiles = async (files: File[]) => {
+    if (!files || files.length === 0) return;
+
+    let hasZip = files.some((f) => isZipFile(f));
+    if (!hasZip) {
+      for (const f of files) {
+        if (await isZipBlob(f)) {
+          hasZip = true;
+          break;
+        }
+      }
+    }
+    if (hasZip) {
+      setIsExtractingZip(true);
+      setZipProgress({ percent: 5, message: 'Membaca file zip...' });
+    }
+
+    try {
+      const { mediaFiles } = await processFilesWithZipExtraction(files, (pct, msg) => {
+        setZipProgress({ percent: pct, message: msg });
+      });
+
+      if (mediaFiles.length === 0) return;
+
+      const newItems: Array<{ url: string; name: string; mediaType: 'image' | 'video' }> = mediaFiles.map((file) => {
+        const url = URL.createObjectURL(file);
+        const mediaType: 'image' | 'video' = isVideoFile(file) ? 'video' : 'image';
+        registerMediaUrl(url, mediaType);
+        return {
+          url,
+          name: file.name,
+          mediaType,
+        };
+      });
+      const updatedAllItems = [...storedImages, ...newItems];
+      setStoredImages(updatedAllItems);
+      const matched = heuristicMatchImagesToLyrics(updatedAllItems, lyrics || [], duration);
+      const slidesWithMedia: SlideItem[] = matched.map((m) => {
+        const found = updatedAllItems.find((item) => item.url === m.slide.url);
+        return {
+          ...m.slide,
+          mediaType: found?.mediaType || getMediaUrlType(m.slide.url, m.slide.name),
+        };
+      });
+      updateBg({
+        type: 'multi_image',
+        multiImageUrls: slidesWithMedia.map((s) => s.url),
+        multiImageSlides: slidesWithMedia,
+      });
+    } catch (err) {
+      console.error('ZIP extraction error:', err);
+    } finally {
+      if (hasZip) {
+        setIsExtractingZip(false);
+      }
     }
   };
 
   const handleMultiImages = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      const newItems = Array.from(e.target.files).map((file) => ({
-        url: URL.createObjectURL(file),
-        name: file.name
-      }));
-      setStoredImages((prev) => [...prev, ...newItems]);
-      const newUrls = newItems.map((i) => i.url);
-      const currentUrls = bgConfig.multiImageUrls || [];
-      updateBg({ multiImageUrls: [...currentUrls, ...newUrls], type: 'multi_image' });
+      processImageFiles(Array.from(e.target.files));
     }
+    if (e.target) e.target.value = '';
   };
 
   const availableImagesForModal = useMemo(() => {
@@ -138,64 +247,142 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
           ))}
         </div>
 
-        {/* Custom Image Upload if selected */}
+        {/* Custom Media Upload if selected */}
         {bgConfig.type === 'custom_image' && (
           <div className="p-3 rounded-xl bg-white/[0.03] border border-cyan-500/30 space-y-2">
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept="image/*,video/*"
               className="hidden"
               onChange={handleCustomImage}
             />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="w-full py-2 px-3 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-xs font-semibold text-cyan-300 flex items-center justify-center gap-2 transition-all"
-            >
-              <Upload className="w-4 h-4" />
-              <span>Choose Wallpaper / Photo</span>
-            </button>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full py-2 px-3 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-xs font-semibold text-cyan-300 flex items-center justify-center gap-1.5 transition-all"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Upload File</span>
+              </button>
+              <button
+                onClick={() => setIsStockModalOpen(true)}
+                className="w-full py-2 px-3 rounded-xl bg-violet-500/15 hover:bg-violet-500/25 border border-violet-500/30 text-xs font-semibold text-violet-300 flex items-center justify-center gap-1.5 transition-all"
+                title="Cari video atau foto dari Pexels, Pixabay, dan koleksi bebas royalti"
+              >
+                <Film className="w-3.5 h-3.5 text-violet-400" />
+                <span>🌐 Cari Stok Online</span>
+              </button>
+            </div>
             {bgConfig.customImageUrl && (
-              <p className="text-[10px] text-emerald-400 text-center">✓ Custom image loaded</p>
+              <p className="text-[10px] text-emerald-400 text-center flex items-center justify-center gap-1">
+                {isVideoMedia(bgConfig.customImageUrl) ? <Video className="w-3 h-3 text-cyan-400" /> : null}
+                <span>✓ Custom {isVideoMedia(bgConfig.customImageUrl) ? 'video' : 'image'} loaded</span>
+              </p>
             )}
           </div>
         )}
 
-        {/* Multi-Image Upload if selected */}
+        {/* Multi-Image / Video Upload if selected */}
         {bgConfig.type === 'multi_image' && (
           <div className="p-3 rounded-xl bg-white/[0.03] border border-indigo-500/30 space-y-3">
             <input
               ref={multiFileInputRef}
               type="file"
               multiple
-              accept="image/*"
+              accept="image/*,video/*,.zip,.zipx,application/zip,application/x-zip-compressed,multipart/x-zip,application/octet-stream,*/*"
               className="hidden"
               onChange={handleMultiImages}
             />
-            <button
-              onClick={() => multiFileInputRef.current?.click()}
-              className="w-full py-2 px-3 rounded-xl bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-semibold text-indigo-300 flex items-center justify-center gap-2 transition-all"
-            >
-              <Upload className="w-4 h-4" />
-              <span>Add Images (Multiple allowed)</span>
-            </button>
+            <input
+              ref={zipFileInputRef}
+              type="file"
+              accept=".zip,.zipx,application/zip,application/x-zip-compressed,multipart/x-zip,application/octet-stream,*/*"
+              multiple
+              className="hidden"
+              onChange={handleMultiImages}
+            />
+
+            <div className="grid grid-cols-3 gap-1.5">
+              <button
+                onClick={() => multiFileInputRef.current?.click()}
+                className="w-full py-2 px-2 rounded-xl bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-[11px] font-semibold text-indigo-300 flex items-center justify-center gap-1 transition-all"
+                title="Pilih beberapa file foto atau video langsung dari folder komputer"
+              >
+                <Upload className="w-3 h-3" />
+                <span>Foto/Video</span>
+              </button>
+              <button
+                onClick={() => zipFileInputRef.current?.click()}
+                className="w-full py-2 px-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-[11px] font-semibold text-amber-300 flex items-center justify-center gap-1 transition-all"
+                title="Upload arsip ZIP dan otomatis ekstrak semua foto dan video di dalamnya"
+              >
+                <FolderArchive className="w-3 h-3 text-amber-400" />
+                <span>Upload ZIP</span>
+              </button>
+              <button
+                onClick={() => setIsStockModalOpen(true)}
+                className="w-full py-2 px-2 rounded-xl bg-violet-500/15 hover:bg-violet-500/25 border border-violet-500/30 text-[11px] font-semibold text-violet-300 flex items-center justify-center gap-1 transition-all"
+                title="Cari stok video atau foto dari Pexels, Pixabay, & Wikimedia"
+              >
+                <Film className="w-3 h-3 text-violet-400" />
+                <span>🌐 Stok Online</span>
+              </button>
+            </div>
+
+            {/* ZIP extraction progress indicator */}
+            {isExtractingZip && (
+              <div className="p-2.5 rounded-xl bg-amber-950/30 border border-amber-500/40 space-y-1.5 animate-pulse">
+                <div className="flex items-center justify-between text-[11px] text-amber-300 font-medium">
+                  <span className="flex items-center gap-1.5">
+                    <FolderArchive className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Mengekstrak file ZIP...</span>
+                  </span>
+                  <span>{zipProgress.percent}%</span>
+                </div>
+                <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                  <div
+                    className="bg-amber-400 h-full transition-all duration-200"
+                    style={{ width: `${zipProgress.percent}%` }}
+                  />
+                </div>
+                <p className="text-[10px] text-slate-400 truncate">{zipProgress.message}</p>
+              </div>
+            )}
             
             <div className="flex flex-wrap gap-2">
-              {(bgConfig.multiImageUrls || []).map((url, i) => (
-                <div key={i} className="relative group w-12 h-12 rounded-md overflow-hidden border border-white/20">
-                  <img src={url} alt={`bg-${i}`} className="w-full h-full object-cover" />
-                  <button 
-                    onClick={() => {
-                      const newUrls = [...(bgConfig.multiImageUrls || [])];
-                      newUrls.splice(i, 1);
-                      updateBg({ multiImageUrls: newUrls });
-                    }}
-                    className="absolute inset-0 bg-red-500/80 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-[10px]"
+              {(bgConfig.multiImageUrls || []).map((url, i) => {
+                const isVid = isVideoMedia(url);
+                return (
+                  <div
+                    key={i}
+                    className={`relative group w-12 h-12 rounded-md overflow-hidden border ${
+                      isVid ? 'border-cyan-400/50 bg-black' : 'border-white/20'
+                    }`}
                   >
-                    X
-                  </button>
-                </div>
-              ))}
+                    {isVid ? (
+                      <video src={url} className="w-full h-full object-cover pointer-events-none" muted playsInline />
+                    ) : (
+                      <img src={url} alt={`bg-${i}`} className="w-full h-full object-cover pointer-events-none" />
+                    )}
+                    {isVid && (
+                      <div className="absolute top-0.5 left-0.5 bg-black/75 px-1 py-0.5 rounded text-[8px] text-cyan-300 pointer-events-none flex items-center">
+                        <Video className="w-2.5 h-2.5" />
+                      </div>
+                    )}
+                    <button 
+                      onClick={() => {
+                        const newUrls = [...(bgConfig.multiImageUrls || [])];
+                        newUrls.splice(i, 1);
+                        updateBg({ multiImageUrls: newUrls });
+                      }}
+                      className="absolute inset-0 bg-red-500/80 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-[10px]"
+                    >
+                      X
+                    </button>
+                  </div>
+                );
+              })}
             </div>
 
             {/* AI Lyric Match Card */}
@@ -288,10 +475,26 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
 
       {/* 2. Audio-Reactive Camera Shake & Bass Zoom */}
       <div className="space-y-4 p-3.5 rounded-2xl bg-white/[0.03] border border-white/10">
-        <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-          <Camera className="w-3.5 h-3.5 text-pink-400" />
-          <span>Bass Reactive FX</span>
-        </label>
+        <div className="flex items-center justify-between">
+          <label className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+            <Camera className="w-3.5 h-3.5 text-pink-400" />
+            <span>Bass Reactive FX</span>
+          </label>
+          {(bgConfig.bassShake > 0 || bgConfig.bassZoom > 0) ? (
+            <button
+              type="button"
+              onClick={() => updateBg({ bassShake: 0, bassZoom: 0 })}
+              className="text-[10px] font-semibold text-rose-400 hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 px-2 py-0.5 rounded-lg transition-all cursor-pointer"
+              title="Set Camera Bass Shake dan Bass Zoom ke 0%"
+            >
+              Matikan Efek Beat (0%)
+            </button>
+          ) : (
+            <span className="text-[10px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-lg">
+              ✓ Beat Mati (Statis)
+            </span>
+          )}
+        </div>
 
         {/* Camera Shake */}
         <div>
@@ -369,6 +572,159 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
             />
           </div>
         </div>
+      </div>
+
+      {/* 2.5 B-Roll Quick Control Card */}
+      <div className="p-3.5 rounded-2xl bg-gradient-to-br from-violet-950/30 to-purple-950/20 border border-violet-500/30 space-y-2.5">
+        <div className="flex items-center justify-between">
+          <label className="text-xs font-bold uppercase tracking-wider text-violet-300 flex items-center gap-1.5">
+            <Film className="w-3.5 h-3.5 text-violet-400" />
+            <span>B-Roll Cutaways & PiP</span>
+          </label>
+          <button
+            onClick={() =>
+              updateBg({
+                bRoll: {
+                  enabled: bgConfig.bRoll?.enabled === false ? true : false,
+                  clips: bgConfig.bRoll?.clips || [],
+                  defaultDisplayMode: bgConfig.bRoll?.defaultDisplayMode || 'cutaway',
+                  defaultPipPosition: bgConfig.bRoll?.defaultPipPosition || 'top_right',
+                  globalOpacity: bgConfig.bRoll?.globalOpacity ?? 1,
+                },
+              })
+            }
+            className={`w-10 h-5 rounded-full transition-colors relative p-0.5 ${
+              bgConfig.bRoll?.enabled !== false && (bgConfig.bRoll?.clips || []).length > 0
+                ? 'bg-violet-600'
+                : 'bg-slate-700'
+            }`}
+          >
+            <div
+              className={`w-4 h-4 rounded-full bg-white transition-transform ${
+                bgConfig.bRoll?.enabled !== false && (bgConfig.bRoll?.clips || []).length > 0
+                  ? 'translate-x-5'
+                  : 'translate-x-0'
+              }`}
+            />
+          </button>
+        </div>
+
+        <p className="text-[11px] text-slate-400">
+          {(bgConfig.bRoll?.clips || []).length > 0
+            ? `${bgConfig.bRoll?.clips.length} klip B-roll aktif di timeline (Cutaway, PiP, Blend).`
+            : 'Sisipkan cuplikan video/foto sekunder atau picture-in-picture di timeline CapCut.'}
+        </p>
+
+        <button
+          onClick={() => setIsBRollModalOpen(true)}
+          className="w-full py-2 px-3 rounded-xl bg-violet-600/20 hover:bg-violet-600/30 border border-violet-500/40 text-xs font-bold text-violet-200 flex items-center justify-center gap-2 transition-all active:scale-95"
+        >
+          <Film className="w-3.5 h-3.5" />
+          <span>Buka Studio & Pustaka B-Roll</span>
+        </button>
+      </div>
+
+      {/* 2.8 EFEK KAMERA VISUAL FRAME TERPILIH (Distorsi, Kamera Jadul, Cacing-cacing) */}
+      <div className="p-3.5 rounded-2xl bg-gradient-to-br from-amber-950/25 via-slate-900/50 to-orange-950/20 border border-amber-500/30 space-y-3">
+        <div className="flex items-center justify-between">
+          <label className="text-xs font-bold uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+            <Wand2 className="w-3.5 h-3.5 text-amber-400" />
+            <span>Efek Kamera Frame Terpilih</span>
+          </label>
+          <span className="text-[10px] text-amber-300/80 bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 rounded-full font-semibold">
+            Bukan Sepanjang Video
+          </span>
+        </div>
+        <p className="text-[10.5px] text-slate-400 leading-relaxed">
+          Pilih efek kamera visual yang hanya akan aktif saat frame/slide tertentu sedang tampil di layar:
+        </p>
+
+        {/* AI Recommendation Action Bar */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setIsAiEffectModalOpen(true)}
+            disabled={!bgConfig.multiImageSlides || bgConfig.multiImageSlides.length === 0}
+            className="flex-1 py-1.5 px-2.5 rounded-xl bg-gradient-to-r from-amber-500/25 via-orange-500/25 to-amber-600/20 hover:from-amber-500/35 hover:to-orange-500/35 border border-amber-500/40 text-xs font-bold text-amber-200 flex items-center justify-center gap-1.5 transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none shadow-sm"
+            title="Buka AI Director untuk merekomendasikan dan memasang efek otomatis ke frame"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+            <span>✨ Rekomendasi Efek AI</span>
+          </button>
+          {bgConfig.multiImageSlides && bgConfig.multiImageSlides.some((s) => s.visualEffect && s.visualEffect !== 'none') && (
+            <button
+              onClick={() => {
+                const cleared = (bgConfig.multiImageSlides || []).map((s) => ({
+                  ...s,
+                  visualEffect: 'none' as VisualEffectType,
+                }));
+                updateBg({ multiImageSlides: cleared });
+              }}
+              className="p-1.5 rounded-xl bg-white/5 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 border border-white/10 transition-all text-xs"
+              title="Reset semua efek frame ke normal"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+
+        {/* Multi-Image Slides List with Effect Selectors */}
+        {bgConfig.type === 'multi_image' && bgConfig.multiImageSlides && bgConfig.multiImageSlides.length > 0 ? (
+          <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+            {bgConfig.multiImageSlides.map((slide, idx) => (
+              <div
+                key={slide.id || idx}
+                className="flex items-center justify-between gap-2 p-2 rounded-xl bg-black/40 border border-white/10 hover:border-white/20 transition-all text-xs"
+              >
+                <div className="flex items-center gap-2 min-w-0 truncate">
+                  <img
+                    src={slide.url}
+                    alt=""
+                    className="w-7 h-7 rounded-lg object-cover border border-white/15 shrink-0 bg-black"
+                  />
+                  <div className="truncate">
+                    <span className="font-bold text-white block truncate text-[11px]">
+                      #{idx + 1} {slide.name || `Foto ${idx + 1}`}
+                    </span>
+                    <span className="text-[9px] font-mono text-slate-400">
+                      {slide.startSec}s - {slide.endSec}s
+                    </span>
+                  </div>
+                </div>
+
+                <select
+                  value={slide.visualEffect || 'none'}
+                  onChange={(e) => {
+                    const updated = [...(bgConfig.multiImageSlides || [])];
+                    updated[idx] = {
+                      ...updated[idx],
+                      visualEffect: e.target.value as VisualEffectType,
+                    };
+                    updateBg({ multiImageSlides: updated });
+                  }}
+                  className={`text-[10px] font-bold px-2 py-1 rounded-lg border outline-none cursor-pointer shrink-0 transition-all ${
+                    slide.visualEffect && slide.visualEffect !== 'none'
+                      ? VISUAL_EFFECT_OPTIONS.find((o) => o.id === slide.visualEffect)?.badgeClass || 'bg-amber-500/25 text-amber-300 border-amber-500/40'
+                      : 'bg-black/60 text-slate-400 border-white/10 hover:text-white'
+                  }`}
+                >
+                  {VISUAL_EFFECT_OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id} className="bg-slate-900 text-white">
+                      {opt.icon} {opt.shortLabel}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="p-3 rounded-xl bg-black/40 border border-white/10 text-center space-y-2">
+            <p className="text-[11px] text-slate-400">
+              {bgConfig.type === 'multi_image'
+                ? 'Klik "+ Foto" di Timeline untuk membuat slide, lalu pilih efek visual untuk tiap slide.'
+                : 'Efek kamera frame juga dapat dipasang langsung pada Timeline di posisi jarum playhead.'}
+            </p>
+          </div>
+        )}
       </div>
 
       {/* 3. Floating Particles & Fireworks Engine */}
@@ -472,6 +828,44 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
         lyrics={lyrics}
         duration={duration}
         onApplySlides={handleApplyAiSlides}
+      />
+
+      {/* B-Roll Modal */}
+      <BRollModal
+        isOpen={isBRollModalOpen}
+        onClose={() => setIsBRollModalOpen(false)}
+        backgroundConfig={bgConfig}
+        onBackgroundChange={onBgChange}
+        currentTime={0}
+        duration={duration}
+        lyrics={lyrics}
+      />
+
+      {/* Stock Media Modal */}
+      <StockMediaModal
+        isOpen={isStockModalOpen}
+        onClose={() => setIsStockModalOpen(false)}
+        onSelectForBackground={handleSelectStockForBackground}
+        onSelectForSlide={handleSelectStockForSlide}
+      />
+
+      {/* AI Visual Effects Recommendation Modal */}
+      <AiVisualEffectsModal
+        isOpen={isAiEffectModalOpen}
+        onClose={() => setIsAiEffectModalOpen(false)}
+        slides={bgConfig.multiImageSlides || []}
+        lyrics={lyrics || []}
+        duration={duration || 0}
+        onApplyEffects={(updatedSlides) => {
+          updateBg({ multiImageSlides: updatedSlides });
+        }}
+        onClearAllEffects={() => {
+          const cleared = (bgConfig.multiImageSlides || []).map((s) => ({
+            ...s,
+            visualEffect: 'none' as VisualEffectType,
+          }));
+          updateBg({ multiImageSlides: cleared });
+        }}
       />
     </div>
   );

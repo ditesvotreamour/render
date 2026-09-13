@@ -100,7 +100,7 @@ on:
 jobs:
   render:
     runs-on: ubuntu-latest
-    name: 🎬 Render Specterr Video
+    name: 🎬 Render BeatFlow Video
     permissions:
       contents: write
       actions: write
@@ -114,10 +114,11 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: 🎞️ Setup FFmpeg
+      - name: 🎞️ Setup FFmpeg & Browser Video Codecs
         run: |
           which ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y ffmpeg)
           ffmpeg -version
+          which google-chrome || which google-chrome-stable || which chromium-browser || which chromium || true
 
       - name: 📦 Install Dependencies & Build Render Harness
         run: |
@@ -298,23 +299,63 @@ export class GitHubRendererService {
   }
 
   /**
-   * Upload image file directly to GitHub repository (under image-uploads/) to bypass 65KB payload limit
+   * Upload image or video file directly to GitHub repository (under image-uploads/ or video-uploads/) to bypass 65KB payload limit
    */
-  public static async uploadImageToRepo(
+  public static async uploadMediaToRepo(
     repo: string,
     token: string,
     prefix: string,
-    base64Data: string
+    base64Data: string,
+    forcedExt?: string
   ): Promise<string> {
     const cleanRepo = repo.trim().replace(/^https:\/\/github\.com\//, '');
-    const cleanBase64 = base64Data.replace(/^data:image\/[a-z0-9+]+;base64,/, '');
-    const isJpeg = base64Data.startsWith('data:image/jpeg') || base64Data.startsWith('data:image/jpg');
-    const ext = isJpeg ? 'jpg' : 'png';
-    const safePrefix = (prefix || 'img')
+    // Strip data URI header for any MIME type safely: data:video/mp4;base64, data:image/png;base64, etc.
+    const cleanBase64 = base64Data.replace(/^data:[^;]+;base64,/, '').trim();
+
+    let ext = forcedExt || 'png';
+    let isVideo = false;
+
+    const lowerPrefix = (prefix || '').toLowerCase();
+    const isVideoHint =
+      forcedExt === 'mp4' ||
+      forcedExt === 'webm' ||
+      forcedExt === 'mov' ||
+      lowerPrefix.includes('video') ||
+      lowerPrefix.includes('clip') ||
+      lowerPrefix.startsWith('vid_') ||
+      lowerPrefix.startsWith('bg_video');
+
+    if (base64Data.startsWith('data:video/mp4') || forcedExt === 'mp4') {
+      ext = 'mp4';
+      isVideo = true;
+    } else if (base64Data.startsWith('data:video/webm') || forcedExt === 'webm') {
+      ext = 'webm';
+      isVideo = true;
+    } else if (base64Data.startsWith('data:video/quicktime') || forcedExt === 'mov') {
+      ext = 'mov';
+      isVideo = true;
+    } else if (base64Data.startsWith('data:video/')) {
+      ext = 'mp4';
+      isVideo = true;
+    } else if (isVideoHint) {
+      ext = forcedExt || 'mp4';
+      isVideo = true;
+    } else if (base64Data.startsWith('data:image/jpeg') || base64Data.startsWith('data:image/jpg') || forcedExt === 'jpg') {
+      ext = 'jpg';
+    } else if (base64Data.startsWith('data:image/webp') || forcedExt === 'webp') {
+      ext = 'webp';
+    } else if (base64Data.startsWith('data:image/svg') || forcedExt === 'svg') {
+      ext = 'svg';
+    } else if (base64Data.startsWith('data:image/gif') || forcedExt === 'gif') {
+      ext = 'gif';
+    }
+
+    const folder = isVideo ? 'video-uploads' : 'image-uploads';
+    const safePrefix = (prefix || (isVideo ? 'vid' : 'img'))
       .replace(/[^a-zA-Z0-9_-]/g, '_')
       .replace(/_+/g, '_')
       .slice(0, 30);
-    const filePath = `image-uploads/${safePrefix}-${Date.now()}.${ext}`;
+    const filePath = `${folder}/${safePrefix}-${Date.now()}.${ext}`;
     const url = `https://api.github.com/repos/${cleanRepo}/contents/${filePath}`;
 
     const res = await fetch(url, {
@@ -334,11 +375,20 @@ export class GitHubRendererService {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(
-        err.message || `Failed to upload image to repository (HTTP ${res.status}). Check token permissions.`
+        err.message || `Failed to upload ${isVideo ? 'video' : 'image'} to repository (HTTP ${res.status}). Check token permissions.`
       );
     }
 
     return filePath;
+  }
+
+  public static async uploadImageToRepo(
+    repo: string,
+    token: string,
+    prefix: string,
+    base64Data: string
+  ): Promise<string> {
+    return this.uploadMediaToRepo(repo, token, prefix, base64Data);
   }
 
   /**
@@ -528,7 +578,7 @@ export class GitHubRendererService {
     // Enrich runs with exact music track title from artifacts if display_title is default
     const enrichedRuns = await Promise.all(
       runs.map(async (run) => {
-        if (!run.display_title || run.display_title === 'Specterr Online Cloud Visualizer Render') {
+        if (!run.display_title || run.display_title === 'Specterr Online Cloud Visualizer Render' || run.display_title === 'BeatFlow Online Cloud Visualizer Render') {
           try {
             const artifacts = await this.getRunArtifacts(repo, token, run.id);
             if (artifacts && artifacts.length > 0) {

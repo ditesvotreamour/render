@@ -171,23 +171,39 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
   };
 
   const handleExportSrt = () => {
+    if (!config.lyrics || config.lyrics.length === 0) return;
     const srt = WhisperAIService.exportToSrt(config.lyrics);
     const blob = new Blob([srt], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'lyrics.srt';
+    const safeTitle = (currentTrack?.title || 'lirik')
+      .replace(/[^a-zA-Z0-9_\-\s]/g, '')
+      .trim()
+      .replace(/\s+/g, '_');
+    a.download = `${safeTitle || 'lyrics'}.srt`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const handleExportLrc = () => {
+    if (!config.lyrics || config.lyrics.length === 0) return;
     const lrc = WhisperAIService.exportToLrc(config.lyrics);
     const blob = new Blob([lrc], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'lyrics.lrc';
+    const safeTitle = (currentTrack?.title || 'lirik')
+      .replace(/[^a-zA-Z0-9_\-\s]/g, '')
+      .trim()
+      .replace(/\s+/g, '_');
+    a.download = `${safeTitle || 'lyrics'}.lrc`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const handleAddLine = () => {
@@ -241,6 +257,12 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
     if (!config.lyrics || config.lyrics.length === 0) return;
     const shifted = WhisperAIService.shiftLyricTimestamps(config.lyrics, deltaSeconds);
     update({ lyrics: shifted });
+  };
+
+  const handleReconstructSentence = () => {
+    if (!config.lyrics || config.lyrics.length === 0) return;
+    const reconstructed = WhisperAIService.reconstructSubtitlesBySentence(config.lyrics);
+    update({ lyrics: reconstructed, singleLineSentenceMode: true });
   };
 
   const handleApplyViralPreset = (preset: (typeof VIRAL_SUBTITLE_PRESETS)[0]) => {
@@ -314,14 +336,14 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
           </span>
         </div>
         <p className="text-xs text-slate-300 leading-relaxed">
-          Transkripsi vokal audio ke lirik subtitle berketepatan tinggi secara instan bertenaga Groq Whisper API.
+          Transkripsi vokal audio ke lirik subtitle berketepatan tinggi secara instan bertenaga AI Whisper (Groq Cloud LPU / OpenAI Official / KoboiLLM Gateway).
         </p>
         <button
           onClick={onOpenWhisperModal}
           className="w-full py-2.5 rounded-xl bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 hover:from-amber-400 hover:to-orange-400 text-black text-xs font-black shadow-lg shadow-orange-500/25 flex items-center justify-center gap-2 transition-all transform hover:scale-[1.02] active:scale-95 cursor-pointer"
         >
           <Zap className="w-4 h-4 fill-black" />
-          <span>⚡ Generate Subtitle dengan Groq API</span>
+          <span>⚡ Generate Subtitle dengan Whisper AI (Groq / OpenAI / KoboiLLM)</span>
         </button>
 
         {onOpenSubtitleEditor && (
@@ -331,6 +353,17 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
           >
             <Type className="w-4 h-4 text-amber-400" />
             <span>📝 Buka Editor Teks Subtitle (Cari & Ganti / Bulk Edit)</span>
+          </button>
+        )}
+
+        {config.lyrics.length > 0 && (
+          <button
+            onClick={handleReconstructSentence}
+            className="w-full py-2.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 hover:text-white text-xs font-black flex items-center justify-center gap-2 transition-all transform active:scale-95 shadow-md shadow-cyan-500/10"
+            title="Gabungkan kata-kata menjadi kalimat utuh per tanda baca (. ? ! ,) dan cegah tabrakan waktu antar kalimat"
+          >
+            <Sparkles className="w-4 h-4 text-cyan-400" />
+            <span>✨ Rapikan Subtitle Per Kalimat (Satu Baris & Anti-Tabrakan)</span>
           </button>
         )}
 
@@ -375,24 +408,24 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
               <span>Import .SRT / .LRC</span>
             </button>
 
-            <div className="flex gap-1">
+            <div className="flex gap-1.5">
               <button
                 onClick={handleExportSrt}
                 disabled={config.lyrics.length === 0}
-                className="flex-1 p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-slate-300 hover:text-white flex items-center justify-center gap-1 transition-all disabled:opacity-40"
-                title="Export as .SRT Subtitles"
+                className="flex-1 p-2 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-xs font-semibold text-cyan-300 hover:text-white flex items-center justify-center gap-1 transition-all disabled:opacity-40"
+                title="Simpan / Download Lirik dalam Format .SRT"
               >
-                <Download className="w-3.5 h-3.5 text-pink-400" />
-                <span>SRT</span>
+                <Download className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Simpan .SRT</span>
               </button>
               <button
                 onClick={handleExportLrc}
                 disabled={config.lyrics.length === 0}
-                className="flex-1 p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-slate-300 hover:text-white flex items-center justify-center gap-1 transition-all disabled:opacity-40"
-                title="Export as .LRC Karaoke"
+                className="flex-1 p-2 rounded-xl bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30 text-xs font-semibold text-indigo-300 hover:text-white flex items-center justify-center gap-1 transition-all disabled:opacity-40"
+                title="Simpan / Download Lirik dalam Format .LRC Karaoke"
               >
                 <Download className="w-3.5 h-3.5 text-indigo-400" />
-                <span>LRC</span>
+                <span>Simpan .LRC</span>
               </button>
             </div>
           </div>
@@ -1061,6 +1094,22 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
 
             {/* Feature Toggles */}
             <div className="grid grid-cols-2 gap-2 pt-2 border-t border-white/10">
+              <button
+                onClick={() => update({ singleLineSentenceMode: config.singleLineSentenceMode === false ? true : false })}
+                className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-between transition-all ${
+                  config.singleLineSentenceMode !== false
+                    ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300 shadow-sm'
+                    : 'bg-white/5 border-white/10 text-slate-400'
+                }`}
+                title="Tampilkan subtitle 1 baris per kalimat utuh tanpa terputus, dan otomatis mengecil pas layar jika kalimat panjang"
+              >
+                <div className="flex items-center gap-1.5 truncate">
+                  <span className="shrink-0">📏</span>
+                  <span className="truncate">1 Baris Kalimat</span>
+                </div>
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: config.singleLineSentenceMode !== false ? '#10B981' : '#475569' }} />
+              </button>
+
               <button
                 onClick={() => update({ wordByWordSing: config.wordByWordSing === false ? true : false })}
                 className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-between transition-all ${

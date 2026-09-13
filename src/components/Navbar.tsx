@@ -72,8 +72,8 @@ export const Navbar: React.FC<NavbarProps> = ({
             title="Klik untuk membuka Pustaka & Riwayat Lagu"
           >
             <div className="flex items-center gap-2">
-              <span className="font-extrabold text-base sm:text-lg tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-white via-slate-200 to-slate-400 font-['Orbitron']">
-                SPECTERR
+              <span className="font-extrabold text-base sm:text-lg tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-white via-cyan-200 to-indigo-300 font-['Orbitron']">
+                BEATFLOW
               </span>
               <span className="text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
                 PRO

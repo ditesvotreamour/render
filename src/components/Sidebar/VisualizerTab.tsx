@@ -29,7 +29,7 @@ interface VisualizerTabProps {
 }
 
 const VISUALIZER_STYLES: { id: VisualizerStyle; label: string; icon: React.ReactNode; desc: string }[] = [
-  { id: 'radial_bars', label: 'Radial Bars', icon: <CircleDot className="w-4 h-4" />, desc: 'Classic Specterr / NCS circular equalizer' },
+  { id: 'radial_bars', label: 'Radial Bars', icon: <CircleDot className="w-4 h-4" />, desc: 'Classic BeatFlow / NCS circular equalizer' },
   { id: 'trap_nation_pulse', label: 'Trap Nation', icon: <Flame className="w-4 h-4" />, desc: 'Bass shockwave rings & high-energy aura pulse' },
   { id: 'cyber_tunnel_3d', label: '3D Cyber Tunnel', icon: <Box className="w-4 h-4" />, desc: 'Perspective 3D wireframe polygon depth tunnel' },
   { id: 'neon_infinity_ribbon', label: 'Neon Infinity', icon: <Infinity className="w-4 h-4" />, desc: 'Dual intertwined DNA helix ribbon with laser rungs' },

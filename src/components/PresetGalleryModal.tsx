@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { X, Sparkles, Check, ArrowRight } from 'lucide-react';
-import type { SpecterrPreset } from '../types/visualizer';
-import { SPECTERR_PRESETS } from '../data/presets';
+import type { BeatFlowPreset } from '../types/visualizer';
+import { BEATFLOW_PRESETS } from '../data/presets';
 
 interface PresetGalleryModalProps {
   isOpen: boolean;
   onClose: () => void;
   currentPresetId: string;
-  onSelectPreset: (preset: SpecterrPreset) => void;
+  onSelectPreset: (preset: BeatFlowPreset) => void;
 }
 
 export const PresetGalleryModal: React.FC<PresetGalleryModalProps> = ({
@@ -31,8 +31,8 @@ export const PresetGalleryModal: React.FC<PresetGalleryModalProps> = ({
 
   const filtered =
     activeCategory === 'All'
-      ? SPECTERR_PRESETS
-      : SPECTERR_PRESETS.filter((p) => p.category === activeCategory);
+      ? BEATFLOW_PRESETS
+      : BEATFLOW_PRESETS.filter((p) => p.category === activeCategory);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
@@ -45,7 +45,7 @@ export const PresetGalleryModal: React.FC<PresetGalleryModalProps> = ({
             </div>
             <div>
               <h3 className="text-sm sm:text-base font-extrabold text-white tracking-wide">
-                Specterr Visualizer Presets
+                BeatFlow Visualizer Presets
               </h3>
               <p className="text-[11px] sm:text-xs text-slate-400">
                 Pilih template visualizer untuk YouTube, TikTok & Reels

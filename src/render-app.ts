@@ -1,5 +1,6 @@
 import { CanvasRenderer } from './utils/canvasRenderer';
 import { OfflineAudioAnalyzer } from './utils/offlineAudioAnalyzer';
+import { registerMediaUrl } from './utils/zipImageExtractor';
 import type {
   VisualizerConfig,
   CenterLogoConfig,
@@ -12,7 +13,7 @@ import type {
 declare global {
   interface Window {
     __INIT_RENDER__: (config: any, audioBase64: string) => Promise<boolean>;
-    __RENDER_FRAME__: (frameIndex: number, fps: number, startTime: number) => string;
+    __RENDER_FRAME__: (frameIndex: number, fps: number, startTime: number) => Promise<string> | string;
     __RENDER_READY__: boolean;
   }
 }
@@ -113,18 +114,41 @@ window.__INIT_RENDER__ = async (config: any, audioBase64: string) => {
 
     analyzer.setAudioBuffer(audioBuffer);
 
-    // Preload and decode Logo & Background assets completely before starting frame render
+    // Preload and decode Logo & Background assets (images and videos) completely before starting frame render
     const imagePreloads: Promise<any>[] = [];
     if (logoConfig?.imageUrl) {
-      imagePreloads.push(renderer.preloadImageAsync(logoConfig.imageUrl));
+      imagePreloads.push(renderer.preloadMediaAsync(logoConfig.imageUrl));
     }
     if (bgConfig?.customImageUrl) {
-      imagePreloads.push(renderer.preloadImageAsync(bgConfig.customImageUrl));
+      imagePreloads.push(renderer.preloadMediaAsync(bgConfig.customImageUrl));
     }
     if (Array.isArray(bgConfig?.multiImageUrls) && bgConfig.multiImageUrls.length > 0) {
       bgConfig.multiImageUrls.forEach((url) => {
-        if (url) imagePreloads.push(renderer.preloadImageAsync(url));
+        if (url) imagePreloads.push(renderer.preloadMediaAsync(url));
       });
+    }
+    if (Array.isArray(bgConfig?.multiImageSlides) && bgConfig.multiImageSlides.length > 0) {
+      bgConfig.multiImageSlides.forEach((slide) => {
+        if (slide?.url) {
+          if (slide.mediaType) {
+            registerMediaUrl(slide.url, slide.mediaType);
+          }
+          imagePreloads.push(renderer.preloadMediaAsync(slide.url, slide.mediaType));
+        }
+      });
+    }
+    if (Array.isArray(bgConfig?.bRoll?.clips) && bgConfig.bRoll.clips.length > 0) {
+      bgConfig.bRoll.clips.forEach((clip) => {
+        if (clip?.url) {
+          if (clip.mediaType) {
+            registerMediaUrl(clip.url, clip.mediaType);
+          }
+          imagePreloads.push(renderer.preloadMediaAsync(clip.url, clip.mediaType));
+        }
+      });
+    }
+    if (effectsConfig?.videoBackground?.customVideoUrl) {
+      imagePreloads.push(renderer.preloadVideoAsync(effectsConfig.videoBackground.customVideoUrl));
     }
     await Promise.all(imagePreloads);
 
@@ -136,9 +160,51 @@ window.__INIT_RENDER__ = async (config: any, audioBase64: string) => {
   }
 };
 
-window.__RENDER_FRAME__ = (frameIndex: number, fps: number, startTime: number): string => {
+window.__RENDER_FRAME__ = async (frameIndex: number, fps: number, startTime: number): Promise<string> => {
   const currentTime = startTime + frameIndex / fps;
   const audioData = analyzer.getFrequencyDataAtTime(currentTime);
+
+  // Preload any active frameSequence images so they are guaranteed ready in canvas
+  const framePreloads: Promise<any>[] = [];
+  if (bgConfig?.videoFrameSequence?.urlPattern) {
+    const seq = bgConfig.videoFrameSequence;
+    const total = Math.max(1, seq.frameCount || 1);
+    const fNum = (Math.floor(currentTime * seq.fps) % total) + 1;
+    const fUrl = seq.urlPattern.replace('%06d', String(fNum).padStart(6, '0'));
+    framePreloads.push(renderer.preloadImageAsync(fUrl));
+  }
+  if (Array.isArray(bgConfig?.multiImageSlides)) {
+    for (const slide of bgConfig.multiImageSlides) {
+      if (slide?.frameSequence?.urlPattern) {
+        if (currentTime >= slide.startSec - 1.0 && currentTime <= slide.endSec + 1.0) {
+          const timeInSlide = Math.max(0, currentTime - slide.startSec);
+          const total = Math.max(1, slide.frameSequence.frameCount || 1);
+          const fNum = (Math.floor(timeInSlide * slide.frameSequence.fps) % total) + 1;
+          const fUrl = slide.frameSequence.urlPattern.replace('%06d', String(fNum).padStart(6, '0'));
+          framePreloads.push(renderer.preloadImageAsync(fUrl));
+        }
+      }
+    }
+  }
+  if (Array.isArray(bgConfig?.bRoll?.clips)) {
+    for (const clip of bgConfig.bRoll.clips) {
+      if (clip?.frameSequence?.urlPattern) {
+        if (currentTime >= clip.startSec - 1.0 && currentTime <= clip.endSec + 1.0) {
+          const timeInClip = Math.max(0, currentTime - clip.startSec);
+          const total = Math.max(1, clip.frameSequence.frameCount || 1);
+          const fNum = (Math.floor(timeInClip * clip.frameSequence.fps) % total) + 1;
+          const fUrl = clip.frameSequence.urlPattern.replace('%06d', String(fNum).padStart(6, '0'));
+          framePreloads.push(renderer.preloadImageAsync(fUrl));
+        }
+      }
+    }
+  }
+  if (framePreloads.length > 0) {
+    await Promise.all(framePreloads);
+  }
+
+  // Synchronize active video element(s) frame position to exact currentTime before snapshotting (for videos without frame sequence)
+  await renderer.syncActiveVideosForTime(bgConfig, currentTime);
 
   renderer.render(
     ctx,
@@ -152,7 +218,7 @@ window.__RENDER_FRAME__ = (frameIndex: number, fps: number, startTime: number): 
     audioData,
     currentTime,
     durationSeconds,
-    true,
+    false, // isPlaying=false during offline frame capture so videos don't drift in wall-clock time
     subtitleConfig,
     effectsConfig
   );

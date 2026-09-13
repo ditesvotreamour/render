@@ -507,6 +507,152 @@ export class AudioTrimmerJoiner {
     const renderedBuffer = await offlineCtx.startRendering();
     return this.audioBufferToWav(renderedBuffer);
   }
+
+  /**
+   * Slice multiple segments from a single audio file and concatenate them seamlessly.
+   * Useful when cutting out unwanted portions (e.g. intro/outro or middle sections).
+   */
+  public static async sliceAndJoinSegments(
+    blobOrFile: Blob | File,
+    segments: Array<{ start: number; end: number }>,
+    outputName: string = 'trimmed_track.mp3',
+    options?: TrimOptions
+  ): Promise<TrimResult> {
+    if (!segments || segments.length === 0) {
+      throw new Error('Tidak ada segmen audio untuk dipotong.');
+    }
+
+    // Filter valid segments
+    const validSegments = segments
+      .map((s) => ({
+        start: Math.max(0, s.start),
+        end: Math.max(s.start + 0.05, s.end),
+      }))
+      .filter((s) => s.end > s.start);
+
+    if (validSegments.length === 0) {
+      throw new Error('Rentang segmen audio tidak valid.');
+    }
+
+    // If only 1 segment, delegate directly to optimized trimAudioFile
+    if (validSegments.length === 1) {
+      return this.trimAudioFile(
+        blobOrFile,
+        validSegments[0].start,
+        validSegments[0].end,
+        outputName,
+        options
+      );
+    }
+
+    const originalBuffer = await this.decodeAudio(blobOrFile);
+    const sampleRate = originalBuffer.sampleRate;
+    const numChannels = originalBuffer.numberOfChannels;
+
+    // Calculate total output samples
+    let totalSamples = 0;
+    const segSampleBounds: Array<{ startSample: number; endSample: number; length: number }> = [];
+
+    for (const seg of validSegments) {
+      const startSec = Math.min(seg.start, originalBuffer.duration);
+      const endSec = Math.min(seg.end, originalBuffer.duration);
+      const startSample = Math.floor(startSec * sampleRate);
+      const endSample = Math.floor(endSec * sampleRate);
+      const length = Math.max(0, endSample - startSample);
+      segSampleBounds.push({ startSample, endSample, length });
+      totalSamples += length;
+    }
+
+    if (totalSamples <= 0) {
+      throw new Error('Total durasi segmen yang dipilih kosong.');
+    }
+
+    const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+    const ctx = new AudioCtxClass();
+    const joinedBuffer = ctx.createBuffer(numChannels, totalSamples, sampleRate);
+    await ctx.close();
+
+    const fadeInSec = Math.max(0, options?.fadeInDuration ?? 0);
+    const fadeOutSec = Math.max(0, options?.fadeOutDuration ?? 0);
+    const volumeGain = Math.max(0.2, Math.min(3.0, options?.volumeGain ?? 1.0));
+    const fadeInSamples = Math.floor(fadeInSec * sampleRate);
+    const fadeOutSamples = Math.floor(fadeOutSec * sampleRate);
+
+    // Micro-fade length (3ms) to avoid boundary click pops between cuts
+    const microFadeLen = Math.floor(sampleRate * 0.003);
+
+    for (let ch = 0; ch < numChannels; ch++) {
+      const srcData = originalBuffer.getChannelData(ch);
+      const dstData = joinedBuffer.getChannelData(ch);
+
+      let currentDstOffset = 0;
+
+      for (let sIdx = 0; sIdx < segSampleBounds.length; sIdx++) {
+        const { startSample, length } = segSampleBounds[sIdx];
+        const isFirstSeg = sIdx === 0;
+        const isLastSeg = sIdx === segSampleBounds.length - 1;
+
+        for (let i = 0; i < length; i++) {
+          let sample = srcData[startSample + i] || 0;
+
+          // Volume Gain
+          if (volumeGain !== 1.0) {
+            sample = sample * volumeGain;
+            if (sample > 0.95 || sample < -0.95) {
+              sample = Math.tanh(sample);
+            }
+          }
+
+          // Global Fade In on beginning of entire joined track
+          if (isFirstSeg && fadeInSamples > 0 && i < fadeInSamples) {
+            sample *= Math.sin(((i / fadeInSamples) * Math.PI) / 2);
+          } else if (!isFirstSeg && i < microFadeLen) {
+            // Anti-pop micro-fade in
+            sample *= i / microFadeLen;
+          }
+
+          // Global Fade Out on end of entire joined track
+          const remainingInTrack = totalSamples - 1 - (currentDstOffset + i);
+          if (isLastSeg && fadeOutSamples > 0 && remainingInTrack < fadeOutSamples) {
+            sample *= Math.sin(((remainingInTrack / fadeOutSamples) * Math.PI) / 2);
+          } else if (!isLastSeg && length - 1 - i < microFadeLen) {
+            // Anti-pop micro-fade out
+            sample *= (length - 1 - i) / microFadeLen;
+          }
+
+          dstData[currentDstOffset + i] = sample;
+        }
+
+        currentDstOffset += length;
+      }
+    }
+
+    const format = options?.format || (outputName.toLowerCase().endsWith('.wav') ? 'wav' : 'mp3');
+    let outBlob: Blob;
+    let finalFileName = outputName;
+
+    if (format === 'wav') {
+      outBlob = this.audioBufferToWav(joinedBuffer);
+      if (!finalFileName.toLowerCase().endsWith('.wav')) {
+        finalFileName = finalFileName.replace(/\.[^/.]+$/, '') + '.wav';
+      }
+    } else {
+      outBlob = this.audioBufferToMp3(joinedBuffer, options?.mp3Bitrate || 320, options?.onProgress);
+      if (!finalFileName.toLowerCase().endsWith('.mp3')) {
+        finalFileName = finalFileName.replace(/\.[^/.]+$/, '') + '.mp3';
+      }
+    }
+
+    const finalDuration = totalSamples / sampleRate;
+    const file = new File([outBlob], finalFileName, { type: format === 'wav' ? 'audio/wav' : 'audio/mp3' });
+
+    return {
+      file,
+      blob: outBlob,
+      duration: finalDuration,
+      format,
+    };
+  }
 }
 
 /**
@@ -565,6 +711,45 @@ export function sliceLyrics(
       end: Number(newEnd.toFixed(3)),
       words,
     });
+  }
+
+  return result;
+}
+
+/**
+ * Slices lyrics across multiple retained segments and aligns them seamlessly.
+ */
+export function sliceLyricsMultiSegments(
+  lyrics: LyricSegment[] | undefined,
+  segments: Array<{ start: number; end: number }>
+): LyricSegment[] {
+  if (!lyrics || lyrics.length === 0 || !segments || segments.length === 0) return [];
+
+  if (segments.length === 1) {
+    return sliceLyrics(lyrics, segments[0].start, segments[0].end);
+  }
+
+  const result: LyricSegment[] = [];
+  let cumulativeTimeOffset = 0;
+
+  for (const seg of segments) {
+    const segSlice = sliceLyrics(lyrics, seg.start, seg.end);
+    for (const item of segSlice) {
+      result.push({
+        ...item,
+        id: `line-${result.length + 1}`,
+        start: Number((item.start + cumulativeTimeOffset).toFixed(3)),
+        end: Number((item.end + cumulativeTimeOffset).toFixed(3)),
+        words: item.words
+          ? item.words.map((w) => ({
+              ...w,
+              start: Number((w.start + cumulativeTimeOffset).toFixed(3)),
+              end: Number((w.end + cumulativeTimeOffset).toFixed(3)),
+            }))
+          : undefined,
+      });
+    }
+    cumulativeTimeOffset += Math.max(0, seg.end - seg.start);
   }
 
   return result;
