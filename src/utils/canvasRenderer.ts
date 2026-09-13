@@ -3033,13 +3033,13 @@ export class CanvasRenderer {
   // WHISPER AI SUBTITLES & KARAOKE LYRICS
   // ==========================================
   private static readonly RANSOM_PALETTES = [
-    { bg: '#FFE500', text: '#000000', fontName: 'Impact', isItalic: false, tilt: -0.05, border: '#000000' },
-    { bg: '#FFFFFF', text: '#0A0A0A', fontName: 'Playfair Display', isItalic: true, tilt: 0.04, border: 'rgba(0,0,0,0.6)' },
-    { bg: '#E11D48', text: '#FFFFFF', fontName: 'Anton', isItalic: false, tilt: -0.035, border: '#000000' },
-    { bg: '#18181B', text: '#FFFFFF', fontName: 'Courier New', isItalic: false, tilt: 0.045, border: 'rgba(255,255,255,0.4)' },
-    { bg: '#06B6D4', text: '#000000', fontName: 'Impact', isItalic: false, tilt: -0.04, border: '#000000' },
-    { bg: '#F43F5E', text: '#FFFFFF', fontName: 'Montserrat', isItalic: false, tilt: 0.035, border: '#000000' },
-    { bg: '#22C55E', text: '#000000', fontName: 'Kanit', isItalic: false, tilt: -0.025, border: '#000000' },
+    { bg: '#FFE500', text: '#000000', fontName: 'Anton', fallback: '"Impact", sans-serif', isItalic: false, tilt: -0.035, border: '#000000' },
+    { bg: '#FFFFFF', text: '#0A0A0A', fontName: 'Playfair Display', fallback: '"Georgia", serif', isItalic: true, tilt: 0.03, border: 'rgba(0,0,0,0.6)' },
+    { bg: '#E11D48', text: '#FFFFFF', fontName: 'Bebas Neue', fallback: '"Anton", sans-serif', isItalic: false, tilt: -0.025, border: '#000000' },
+    { bg: '#18181B', text: '#FFFFFF', fontName: 'Courier Prime', fallback: '"Courier New", monospace', isItalic: false, tilt: 0.035, border: 'rgba(255,255,255,0.4)' },
+    { bg: '#06B6D4', text: '#000000', fontName: 'Special Elite', fallback: '"Courier New", monospace', isItalic: false, tilt: -0.03, border: '#000000' },
+    { bg: '#F43F5E', text: '#FFFFFF', fontName: 'Montserrat', fallback: 'sans-serif', isItalic: false, tilt: 0.025, border: '#000000' },
+    { bg: '#22C55E', text: '#000000', fontName: 'Kanit', fallback: 'sans-serif', isItalic: true, tilt: -0.025, border: '#000000' },
   ];
 
   private static readonly KINETIC_FONT_VARIANTS = [
@@ -3215,7 +3215,7 @@ export class CanvasRenderer {
     const strokeMargin = Math.max(sub.strokeWidth ?? 4, 4) * 0.8;
     // Pop bounce buffer for kinetic styles so enlarged active word doesn't collide with neighbors
     const kineticBuffer = isHormozi ? Math.max(6, fontSize * 0.12) : 0;
-    const extraStyleSpace = isRansom ? Math.max(12, fontSize * 0.3) : isBrutalism ? Math.max(8, fontSize * 0.22) : 0;
+    const extraStyleSpace = isRansom ? Math.max(22, fontSize * 0.52) : isBrutalism ? Math.max(8, fontSize * 0.22) : 0;
     const userSpacing = typeof sub.wordSpacing === 'number' ? sub.wordSpacing : 0;
     
     const spaceW = Math.max(rawSpaceW, proportionalSpace) + strokeMargin + kineticBuffer + extraStyleSpace + userSpacing;
@@ -3250,7 +3250,8 @@ export class CanvasRenderer {
         if (isRansom) {
           const charSum = w.word.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
           ransomCfg = CanvasRenderer.RANSOM_PALETTES[(charSum + idx) % CanvasRenderer.RANSOM_PALETTES.length];
-          wordFont = `${ransomCfg.isItalic ? 'italic ' : ''}bold ${fontSize}px "${ransomCfg.fontName}", sans-serif`;
+          const fb = ransomCfg.fallback || 'sans-serif';
+          wordFont = `${ransomCfg.isItalic ? 'italic ' : ''}bold ${fontSize}px "${ransomCfg.fontName}", ${fb}`;
           displayW = idx % 2 === 0 ? w.word.toUpperCase() : w.word;
         } else if (isKineticTypo) {
           const charSum = w.word.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
@@ -3389,63 +3390,69 @@ export class CanvasRenderer {
           if (isRansom) {
             // === RANSOM NOTE COLLAGE CUTOUT BADGE ===
             const cfg = (w as any).ransomCfg || CanvasRenderer.RANSOM_PALETTES[0];
-            const pillPadX = Math.max(7, Math.round(fontSize * 0.16));
-            const pillH = fontSize * 1.28;
-            const tilt = cfg.tilt;
-
             ctx.font = (w as any).wordFont || ctx.font;
+
+            // Dynamically measure actual rendered text width to guarantee box ALWAYS encloses text with balanced padding
+            const actualTextW = Math.max(w.width || 0, ctx.measureText(w.displayWord).width);
+            const pillPadX = Math.max(14, Math.round(fontSize * 0.26));
+            const pillH = fontSize * 1.34;
+            const badgeW = actualTextW + pillPadX * 2;
+            const tilt = cfg.tilt;
+            const wCenter = curX + actualTextW / 2;
+
+            ctx.textAlign = 'center';
 
             if (isActive) {
               const popScale = Math.min(1.28, 1.12 + Math.sin(wp * Math.PI) * 0.12 + bass * 0.12);
-              ctx.translate(wcx, lineY);
+              ctx.translate(wCenter, lineY);
               ctx.rotate(tilt);
               ctx.scale(popScale, popScale);
-              ctx.translate(-wcx, -lineY);
+              ctx.translate(-wCenter, -lineY);
 
               ctx.shadowColor = 'rgba(0, 0, 0, 0.75)';
               ctx.shadowBlur = 14;
               ctx.shadowOffsetY = 4;
 
               ctx.fillStyle = cfg.bg;
-              ctx.fillRect(curX - pillPadX, lineY - pillH * 0.5, w.width + pillPadX * 2, pillH);
+              ctx.fillRect(wCenter - badgeW / 2, lineY - pillH * 0.5, badgeW, pillH);
 
               ctx.strokeStyle = '#000000';
               ctx.lineWidth = 2.5;
-              ctx.strokeRect(curX - pillPadX, lineY - pillH * 0.5, w.width + pillPadX * 2, pillH);
+              ctx.strokeRect(wCenter - badgeW / 2, lineY - pillH * 0.5, badgeW, pillH);
 
               ctx.shadowBlur = 0;
               ctx.shadowOffsetY = 0;
               ctx.fillStyle = cfg.text;
-              ctx.fillText(w.displayWord, curX, lineY);
+              ctx.fillText(w.displayWord, wCenter, lineY);
             } else if (isSung) {
-              ctx.translate(wcx, lineY);
+              ctx.translate(wCenter, lineY);
               ctx.rotate(tilt);
-              ctx.translate(-wcx, -lineY);
+              ctx.translate(-wCenter, -lineY);
 
               ctx.fillStyle = cfg.bg;
-              ctx.fillRect(curX - pillPadX, lineY - pillH * 0.5, w.width + pillPadX * 2, pillH);
+              ctx.fillRect(wCenter - badgeW / 2, lineY - pillH * 0.5, badgeW, pillH);
 
               ctx.strokeStyle = cfg.border;
               ctx.lineWidth = 1.5;
-              ctx.strokeRect(curX - pillPadX, lineY - pillH * 0.5, w.width + pillPadX * 2, pillH);
+              ctx.strokeRect(wCenter - badgeW / 2, lineY - pillH * 0.5, badgeW, pillH);
 
               ctx.fillStyle = cfg.text;
-              ctx.fillText(w.displayWord, curX, lineY);
+              ctx.fillText(w.displayWord, wCenter, lineY);
             } else {
               ctx.globalAlpha = alpha * 0.70;
-              ctx.translate(wcx, lineY);
+              ctx.translate(wCenter, lineY);
               ctx.rotate(tilt);
-              ctx.translate(-wcx, -lineY);
+              ctx.translate(-wCenter, -lineY);
 
               ctx.fillStyle = cfg.bg;
-              ctx.fillRect(curX - pillPadX, lineY - pillH * 0.5, w.width + pillPadX * 2, pillH);
+              ctx.fillRect(wCenter - badgeW / 2, lineY - pillH * 0.5, badgeW, pillH);
 
               ctx.strokeStyle = cfg.border;
               ctx.lineWidth = 1.5;
-              ctx.strokeRect(curX - pillPadX, lineY - pillH * 0.5, w.width + pillPadX * 2, pillH);
+              ctx.strokeRect(wCenter - badgeW / 2, lineY - pillH * 0.5, badgeW, pillH);
 
               ctx.fillStyle = cfg.text;
-              ctx.fillText(w.displayWord, curX, lineY);
+              ctx.fillText(w.displayWord, wCenter, lineY);
             }
           } else if (isBrutalism) {
             // === BRUTALISM / Y2K RAW CYBER AESTHETIC ===
@@ -3820,7 +3827,8 @@ export class CanvasRenderer {
           }
 
           ctx.restore();
-          curX += w.width + spaceW;
+          const wordStepW = isRansom ? Math.max(w.width || 0, ctx.measureText(w.displayWord).width) : w.width;
+          curX += wordStepW + spaceW;
         }
 
         ctx.restore();

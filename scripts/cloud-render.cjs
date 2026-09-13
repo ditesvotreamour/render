@@ -491,6 +491,30 @@ async function main() {
 
   console.log('🔤 Waiting for Google Fonts & typography to be fully ready in browser context...');
   await page.evaluate(async () => {
+    const fontPreloads = [
+      'bold 46px "Playfair Display"',
+      'italic bold 46px "Playfair Display"',
+      'bold 46px "Anton"',
+      'bold 46px "Bebas Neue"',
+      'bold 46px "Courier Prime"',
+      'italic bold 46px "Courier Prime"',
+      'bold 46px "Special Elite"',
+      'bold 46px "Montserrat"',
+      'bold 46px "Kanit"',
+      'italic bold 46px "Kanit"',
+      'bold 46px "Rubik"',
+      'bold 46px "Impact"',
+      'bold 46px "Inter"',
+      'bold 46px "Cinzel"',
+      'bold 46px "Black Ops One"',
+      'bold 46px "Orbitron"',
+      'bold 46px "Poppins"',
+      'bold 46px "Syne"',
+      'bold 46px "Syncopate"',
+    ];
+    if (document.fonts && document.fonts.load) {
+      await Promise.allSettled(fontPreloads.map((f) => document.fonts.load(f)));
+    }
     if (document.fonts && document.fonts.ready) {
       await document.fonts.ready;
     }
