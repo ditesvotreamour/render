@@ -90,6 +90,8 @@ jobs:
             sudo apt-get update -qq && sudo apt-get install -y google-chrome-stable || true
           fi
           which google-chrome || which google-chrome-stable || which chromium-browser || which chromium || true
+          sudo apt-get install -y fonts-liberation fonts-noto-core fonts-dejavu-core fonts-freefont-ttf || true
+          sudo fc-cache -f || true
 
       - name: 📦 Install Dependencies & Build Render Harness
         run: |

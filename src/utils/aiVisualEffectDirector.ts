@@ -43,11 +43,10 @@ export interface DirectorOptions {
 }
 
 export const GROQ_DIRECTOR_MODELS = [
-  { id: 'openai/gpt-oss-20b', label: '⚡ GPT OSS 20B (Rekomendasi Resmi Groq: 1000 t/s Sangat Cepat)' },
-  { id: 'openai/gpt-oss-120b', label: '🧠 GPT OSS 120B (Flagship Groq: Penalaran Mendalam 500 t/s)' },
-  { id: 'qwen/qwen3.6-27b', label: '🎯 Qwen 3.6 27B (Presisi & Cerdas)' },
-  { id: 'groq/compound-mini', label: '🤖 Groq Compound Mini (Efisien)' },
-  { id: 'groq/compound', label: '🌌 Groq Compound' },
+  { id: 'llama-3.3-70b-versatile', label: '🧠 Llama 3.3 70B Versatile (Flagship Groq: Penalaran Mendalam & Direkomendasikan)' },
+  { id: 'llama-3.1-8b-instant', label: '⚡ Llama 3.1 8B Instant (Super Cepat ~1000 t/s & Sangat Stabil)' },
+  { id: 'gemma2-9b-it', label: '🎯 Gemma 2 9B IT (Presisi & Cerdas)' },
+  { id: 'openai/gpt-oss-20b', label: '🤖 GPT OSS 20B (Kompatibilitas Eksperimental)' },
 ];
 
 /** Keyword dictionary for semantic mood detection */
@@ -365,15 +364,23 @@ Provide the recommended camera effect assignments in valid JSON.`;
     ? 'https://api.koboillm.com/v1/chat/completions'
     : 'https://api.groq.com/openai/v1/chat/completions';
 
-  const requestedModel = options.model || (isKoboi ? 'gpt-4o-mini' : 'openai/gpt-oss-20b');
+  const requestedModel = options.model || (isKoboi ? 'gpt-4o-mini' : 'llama-3.3-70b-versatile');
   const modelsToTry = isKoboi
-    ? [requestedModel, 'gpt-4o-mini', 'gpt-4o', 'qwen/qwen3.6-27b']
+    ? [requestedModel, 'gpt-4o-mini', 'gpt-4o']
     : [
         requestedModel,
-        'openai/gpt-oss-20b',
-        'openai/gpt-oss-120b',
-        'qwen/qwen3.6-27b',
-        'groq/compound-mini',
+        'llama-3.3-70b-versatile',
+        'llama-3.3-70b-specdec',
+        'deepseek-r1-distill-llama-70b',
+        'llama-3.1-70b-versatile',
+        'llama3-70b-8192',
+        'llama-3.1-8b-instant',
+        'llama3-8b-8192',
+        'llama-3.2-3b-preview',
+        'llama-3.2-1b-preview',
+        'mixtral-8x7b-32768',
+        'gemma2-9b-it',
+        'qwen-2.5-32b',
       ].filter((v, i, a) => a.indexOf(v) === i); // unique list
 
   let lastError: Error | null = null;

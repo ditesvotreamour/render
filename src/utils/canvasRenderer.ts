@@ -120,17 +120,26 @@ export class CanvasRenderer {
       return existing;
     }
     const video = document.createElement('video');
-    video.crossOrigin = 'anonymous';
+    if (!url.startsWith('blob:') && !url.startsWith('data:')) {
+      video.crossOrigin = 'anonymous';
+    }
+    video.preload = 'auto';
     video.src = url;
     video.loop = true;
     video.muted = true;
     video.playsInline = true;
-    video.autoplay = true;
+    video.autoplay = false;
     const harness = document.getElementById('video-harness') || document.body;
     if (harness && !video.parentElement) {
       harness.appendChild(video);
     }
-    video.play().catch(() => {});
+    video.load();
+    // Warm up the video decoder to decode frame 0 without running ahead
+    video.addEventListener('loadedmetadata', () => {
+      try {
+        if (video.currentTime === 0) video.currentTime = 0.001;
+      } catch {}
+    }, { once: true });
     this.videoCache.set(url, video);
     return video;
   }
@@ -143,17 +152,20 @@ export class CanvasRenderer {
       if (harness && !cached.parentElement) {
         harness.appendChild(cached);
       }
-      if (cached.readyState >= 2 || cached.videoWidth > 0) {
+      if (cached.readyState >= 1 || cached.videoWidth > 0) {
         return Promise.resolve(cached);
       }
     }
     return new Promise((resolve) => {
       const video = document.createElement('video');
-      video.crossOrigin = 'anonymous';
+      if (!url.startsWith('blob:') && !url.startsWith('data:')) {
+        video.crossOrigin = 'anonymous';
+      }
+      video.preload = 'auto';
       video.muted = true;
       video.loop = true;
       video.playsInline = true;
-      video.autoplay = true;
+      video.autoplay = false;
       const harness = document.getElementById('video-harness') || document.body;
       if (harness && !video.parentElement) {
         harness.appendChild(video);
@@ -178,6 +190,11 @@ export class CanvasRenderer {
       setTimeout(() => onReady(), 3500);
       video.src = url;
       video.load();
+      video.addEventListener('loadedmetadata', () => {
+        try {
+          if (video.currentTime === 0) video.currentTime = 0.001;
+        } catch {}
+      }, { once: true });
     });
   }
 
@@ -391,7 +408,7 @@ export class CanvasRenderer {
 
     // --- 2.5 Draw B-Roll Layer (Cutaways, PiP, Split Screen, Blend Overlay) ---
     if (bg.bRoll && bg.bRoll.enabled !== false && bg.bRoll.clips && bg.bRoll.clips.length > 0) {
-      this.drawBRollLayer(ctx, width, height, bg.bRoll, currentTime, isPlaying);
+      this.drawBRollLayer(ctx, width, height, bg.bRoll, currentTime, isPlaying, bg);
     }
 
     // --- 3. Draw Background Particles ---
@@ -418,7 +435,7 @@ export class CanvasRenderer {
 
     // --- 5. Draw Visualizer Spectrum ---
     if (visualizer.enabled !== false) {
-      this.drawVisualizer(ctx, visualizer, audioData, isPlaying);
+      this.drawVisualizer(ctx, visualizer, audioData, isPlaying, width, height, subtitle);
     }
 
     ctx.restore(); // restore center transformation
@@ -498,16 +515,27 @@ export class CanvasRenderer {
         }
       }
 
-      const isVid = isVideoMedia(bg.customImageUrl);
+      const isVid = isVideoMedia(bg.customImageUrl) || this.videoCache.has(bg.customImageUrl) || bg.customImageMediaType === 'video';
       if (isVid) {
         const video = this.preloadVideo(bg.customImageUrl);
         if (video) {
           video.muted = true;
           video.volume = 0;
+          if (video.duration && Number.isFinite(video.duration) && video.duration > 0) {
+            const targetTime = Math.max(0, currentTime) % video.duration;
+            const drift = Math.abs(video.currentTime - targetTime);
+            if (drift > 1.2 || (!isPlaying && drift > 0.08)) {
+              try {
+                video.currentTime = targetTime;
+              } catch {
+                // ignore
+              }
+            }
+          }
           if (isPlaying) {
             if (video.paused) video.play().catch(() => {});
-          } else {
-            if (!video.paused) video.pause();
+          } else if (!video.paused) {
+            video.pause();
           }
           if (video.readyState >= 1 || (video.videoWidth || 0) > 0) {
             ctx.save();
@@ -563,6 +591,7 @@ export class CanvasRenderer {
       const totalTime = Math.max(0, currentTime);
       const isKenBurns = bg.multiImageKenBurns !== false;
       const transType = bg.multiImageTransition || 'fade';
+      const activeVideos = new Set<HTMLVideoElement>();
 
       // Reusable drawer for media (photo or video) with continuous global-time camera trajectory
       const renderSlideMedia = (
@@ -601,24 +630,44 @@ export class CanvasRenderer {
           const video = this.preloadVideo(url);
           if (!video) return;
 
+          activeVideos.add(video);
+
           video.muted = true;
           video.volume = 0;
 
-          // Sync video position with slide duration & looping
-          const timeInSlide = Math.max(0, totalTime - startSec);
-          if (video.duration && Number.isFinite(video.duration) && video.duration > 0) {
-            const targetTime = timeInSlide % video.duration;
-            if (Math.abs(video.currentTime - targetTime) > 0.35) {
-              video.currentTime = targetTime;
+          // Check if this slide is currently entering in a transition (totalTime < startSec)
+          const isEnteringTransition = totalTime < startSec;
+          if (isEnteringTransition) {
+            // Keep video parked at frame 0 so it doesn't play ahead during crossfade/slide
+            // and then snap back to 0 when totalTime hits startSec
+            if (video.currentTime > 0.08) {
+              try {
+                video.currentTime = 0;
+              } catch {}
             }
-          }
-
-          if (isPlaying) {
-            if (video.paused) {
-              video.play().catch(() => {});
+            if (!video.paused) {
+              video.pause();
             }
           } else {
-            if (!video.paused) {
+            // Sync video position with slide duration & looping
+            const timeInSlide = totalTime - startSec;
+            if (video.duration && Number.isFinite(video.duration) && video.duration > 0) {
+              const targetTime = timeInSlide % video.duration;
+              const drift = Math.abs(video.currentTime - targetTime);
+              // Only seek if drift is large (> 1.2s) or if paused and out of sync (> 0.08s)
+              // This avoids stutter/freezing from decoder micro-seeks during continuous playback
+              if (drift > 1.2 || (!isPlaying && drift > 0.08)) {
+                try {
+                  video.currentTime = targetTime;
+                } catch {}
+              }
+            }
+
+            if (isPlaying) {
+              if (video.paused) {
+                video.play().catch(() => {});
+              }
+            } else if (!video.paused) {
               video.pause();
             }
           }
@@ -856,6 +905,28 @@ export class CanvasRenderer {
           }
         }
       }
+
+      // Pause any cached slideshow videos that are not currently active in this frame
+      if (bg.multiImageSlides && bg.multiImageSlides.length > 0) {
+        for (const slide of bg.multiImageSlides) {
+          if (slide.url && isVideoMedia(slide.url, slide.mediaType)) {
+            const vid = this.videoCache.get(slide.url);
+            if (vid && !activeVideos.has(vid) && !vid.paused) {
+              vid.pause();
+            }
+          }
+        }
+      }
+      if (bg.multiImageUrls && bg.multiImageUrls.length > 0) {
+        for (const url of bg.multiImageUrls) {
+          if (url && isVideoMedia(url)) {
+            const vid = this.videoCache.get(url);
+            if (vid && !activeVideos.has(vid) && !vid.paused) {
+              vid.pause();
+            }
+          }
+        }
+      }
     } else if (bg.type === 'preset_grid') {
       // Cyberpunk 3D perspective grid
       ctx.fillStyle = bg.solidColor || '#080812';
@@ -1047,7 +1118,7 @@ export class CanvasRenderer {
     }
 
     // 0. Video Background Looper if enabled (Drawn on top of standard solid fill, blended via opacity)
-    if (effects?.videoBackground?.enabled) {
+    if (effects?.videoBackground?.enabled && bg.type !== 'custom_image' && bg.type !== 'multi_image') {
       this.drawVideoBackground(ctx, width, height, effects.videoBackground, bass, isPlaying);
     }
   }
@@ -1061,7 +1132,8 @@ export class CanvasRenderer {
     height: number,
     bRoll: BRollConfig,
     currentTime: number,
-    isPlaying: boolean
+    isPlaying: boolean,
+    bg?: BackgroundConfig
   ): void {
     if (!bRoll || bRoll.enabled === false || !bRoll.clips || bRoll.clips.length === 0) {
       return;
@@ -1070,6 +1142,18 @@ export class CanvasRenderer {
     const activeClips = bRoll.clips.filter(
       (c) => currentTime >= c.startSec && currentTime < c.endSec
     );
+
+    // Pause inactive B-Roll videos
+    for (const c of bRoll.clips) {
+      if (isVideoMedia(c.url, c.mediaType)) {
+        const isActive = activeClips.some((ac) => ac.id === c.id || ac.url === c.url);
+        if (!isActive) {
+          const v = this.videoCache.get(c.url);
+          if (v && !v.paused) v.pause();
+        }
+      }
+    }
+
     if (activeClips.length === 0) return;
 
     for (const clip of activeClips) {
@@ -1117,14 +1201,17 @@ export class CanvasRenderer {
           vid.volume = 0;
           if (vid.duration && Number.isFinite(vid.duration) && vid.duration > 0) {
             const targetTime = timeInClip % vid.duration;
-            if (Math.abs(vid.currentTime - targetTime) > 0.35) {
-              vid.currentTime = targetTime;
+            const drift = Math.abs(vid.currentTime - targetTime);
+            if (drift > 1.2 || (!isPlaying && drift > 0.08)) {
+              try {
+                vid.currentTime = targetTime;
+              } catch {}
             }
           }
           if (isPlaying) {
             if (vid.paused) vid.play().catch(() => {});
-          } else {
-            if (!vid.paused) vid.pause();
+          } else if (!vid.paused) {
+            vid.pause();
           }
           if (vid.readyState >= 1 || (vid.videoWidth || 0) > 0) {
             naturalW = vid.videoWidth || 1920;
@@ -1173,6 +1260,26 @@ export class CanvasRenderer {
           dy = (height - dh) / 2;
         }
         ctx.drawImage(sourceToDraw, dx, dy, dw, dh);
+
+        // Apply background dimming and vignette to B-Roll Cutaway if configured
+        if (bg && bg.dimOpacity > 0) {
+          ctx.fillStyle = `rgba(0, 0, 0, ${bg.dimOpacity * effectiveAlpha})`;
+          ctx.fillRect(0, 0, width, height);
+        }
+        if (bg && bg.vignette > 0) {
+          const vGrad = ctx.createRadialGradient(
+            width / 2,
+            height / 2,
+            Math.min(width, height) * 0.35,
+            width / 2,
+            height / 2,
+            Math.max(width, height) * 0.75
+          );
+          vGrad.addColorStop(0, 'rgba(0,0,0,0)');
+          vGrad.addColorStop(1, `rgba(0,0,0,${bg.vignette * 0.95 * effectiveAlpha})`);
+          ctx.fillStyle = vGrad;
+          ctx.fillRect(0, 0, width, height);
+        }
 
       } else if (mode === 'pip') {
         // --- 2. PICTURE-IN-PICTURE (Floating Window) ---
@@ -1531,11 +1638,65 @@ export class CanvasRenderer {
     ctx: CanvasRenderingContext2D,
     vis: VisualizerConfig,
     audioData: AudioFrequencyData,
-    isPlaying: boolean
+    isPlaying: boolean,
+    width: number = 1920,
+    height: number = 1080,
+    subtitle?: SubtitleConfig
   ): void {
     if (vis.enabled === false) return;
 
     ctx.save();
+
+    const isVerticalStyle =
+      vis.style === 'linear_bars' ||
+      vis.style === 'monstercat_bars' ||
+      vis.style === 'neon_pillars' ||
+      vis.style === 'led_spectrum' ||
+      vis.style === 'voice_soundwave' ||
+      vis.style === 'laser_needles';
+
+    // 1. Calculate Target Position (customPosY / customPosX / positionMode)
+    let defaultYPercent = isVerticalStyle ? 65 : 50;
+    if (vis.positionMode === 'bottom') {
+      defaultYPercent = 90;
+    } else if (vis.positionMode === 'below_subtitle') {
+      if (subtitle && subtitle.enabled !== false) {
+        const subY = typeof subtitle.customPosY === 'number'
+          ? (subtitle.customPosY / 100) * height
+          : (subtitle.position === 'bottom' ? height * 0.86 : subtitle.position === 'top' ? height * 0.16 : height * 0.74);
+        const subH = (subtitle.fontSize || 46) * 1.5;
+        defaultYPercent = Math.min(95, Math.max(12, ((subY + subH * 0.85) / height) * 100));
+      } else {
+        defaultYPercent = 88;
+      }
+    } else if (vis.positionMode === 'above_subtitle') {
+      if (subtitle && subtitle.enabled !== false) {
+        const subY = typeof subtitle.customPosY === 'number'
+          ? (subtitle.customPosY / 100) * height
+          : (subtitle.position === 'bottom' ? height * 0.86 : subtitle.position === 'top' ? height * 0.16 : height * 0.74);
+        const subH = (subtitle.fontSize || 46) * 1.5;
+        defaultYPercent = Math.max(10, ((subY - subH * 1.05) / height) * 100);
+      } else {
+        defaultYPercent = 62;
+      }
+    } else if (vis.positionMode === 'center') {
+      defaultYPercent = 50;
+    }
+
+    const yPercent = typeof vis.customPosY === 'number' ? vis.customPosY : defaultYPercent;
+    const xPercent = typeof vis.customPosX === 'number' ? vis.customPosX : 50;
+
+    const targetX = (xPercent / 100) * width;
+    const targetY = (yPercent / 100) * height;
+
+    const centerX = width / 2;
+    const centerY = height / 2;
+
+    const offsetX = targetX - centerX;
+    const offsetY = targetY - centerY;
+
+    ctx.translate(offsetX, offsetY);
+
     if (vis.pulseWithBass && isPlaying) {
       const pulse = 1 + Math.pow(audioData.bassEnergy, 1.25) * 0.13;
       ctx.scale(pulse, pulse);
@@ -1548,7 +1709,7 @@ export class CanvasRenderer {
     } else if (style === 'radial_wave') {
       this.drawRadialWave(ctx, vis, audioData, isPlaying);
     } else if (style === 'linear_bars') {
-      this.drawLinearBars(ctx, vis, audioData, isPlaying);
+      this.drawLinearBars(ctx, vis, audioData, isPlaying, width);
     } else if (style === 'oscilloscope') {
       this.drawOscilloscope(ctx, vis, audioData, isPlaying);
     } else if (style === 'hexagon_pulse') {
@@ -1556,7 +1717,15 @@ export class CanvasRenderer {
     } else if (style === 'particle_tunnel') {
       this.drawParticleTunnelVisualizer(ctx, vis, audioData, isPlaying);
     } else if (style === 'monstercat_bars') {
-      this.drawMonstercatBars(ctx, vis, audioData, isPlaying);
+      this.drawMonstercatBars(ctx, vis, audioData, isPlaying, width);
+    } else if (style === 'neon_pillars') {
+      this.drawNeonPillars(ctx, vis, audioData, isPlaying, width);
+    } else if (style === 'led_spectrum') {
+      this.drawLedSpectrum(ctx, vis, audioData, isPlaying, width);
+    } else if (style === 'voice_soundwave') {
+      this.drawVoiceSoundwave(ctx, vis, audioData, isPlaying, width);
+    } else if (style === 'laser_needles') {
+      this.drawLaserNeedles(ctx, vis, audioData, isPlaying, width);
     } else if (style === 'minimal_halo') {
       this.drawMinimalHalo(ctx, vis, audioData, isPlaying);
     } else if (style === 'double_orbit') {
@@ -1742,7 +1911,8 @@ export class CanvasRenderer {
     ctx: CanvasRenderingContext2D,
     vis: VisualizerConfig,
     audioData: AudioFrequencyData,
-    isPlaying: boolean
+    isPlaying: boolean,
+    canvasWidth: number = 1920
   ): void {
     const { barCount, maxBarHeight, barWidth, roundCaps, glow, bassBoost } = vis;
     const freq = audioData.frequencyData;
@@ -1753,9 +1923,12 @@ export class CanvasRenderer {
       ctx.shadowBlur = glow + (isPlaying ? audioData.bassEnergy * 20 : 0);
     }
 
-    const totalWidth = barCount * (barWidth + 4);
+    const availableW = canvasWidth * (vis.spectrumWidth ? vis.spectrumWidth / 100 : 0.72);
+    const spacing = Math.max(1.5, (availableW - barCount * barWidth) / Math.max(1, barCount - 1));
+    const totalWidth = barCount * barWidth + (barCount - 1) * spacing;
     const startX = -totalWidth / 2;
-    const centerYPos = 140; // placed below center
+    const baseLineY = 0;
+    const sign = vis.invertDirection ? -1 : 1;
 
     for (let i = 0; i < barCount; i++) {
       const normalizedIndex = vis.mirror
@@ -1765,14 +1938,15 @@ export class CanvasRenderer {
       const rawVal = this.getProcessedFrequency(freq, normalizedIndex, isPlaying, bassBoost, i * 0.4);
       const height = Math.max(4, rawVal * maxBarHeight);
 
-      const x = startX + i * (barWidth + 4);
+      const x = startX + i * (barWidth + spacing);
+      const barY = sign > 0 ? baseLineY - height : baseLineY;
 
-      ctx.fillStyle = this.getColorForBar(ctx, vis, i, barCount, x, centerYPos - height, x, centerYPos);
+      ctx.fillStyle = this.getColorForBar(ctx, vis, i, barCount, x, barY, x, barY + height);
       ctx.beginPath();
       if (roundCaps) {
-        ctx.roundRect(x, centerYPos - height, barWidth, height, [barWidth / 2, barWidth / 2, 0, 0]);
+        ctx.roundRect(x, barY, barWidth, height, [barWidth / 2, barWidth / 2, 0, 0]);
       } else {
-        ctx.rect(x, centerYPos - height, barWidth, height);
+        ctx.rect(x, barY, barWidth, height);
       }
       ctx.fill();
     }
@@ -1933,7 +2107,8 @@ export class CanvasRenderer {
     ctx: CanvasRenderingContext2D,
     vis: VisualizerConfig,
     audioData: AudioFrequencyData,
-    isPlaying: boolean
+    isPlaying: boolean,
+    canvasWidth: number = 1920
   ): void {
     const { barCount, maxBarHeight, barWidth, roundCaps, glow, bassBoost } = vis;
     const freq = audioData.frequencyData;
@@ -1949,10 +2124,12 @@ export class CanvasRenderer {
       this.peakCaps.push({ value: 0, velocity: 0 });
     }
 
-    const spacing = 5;
-    const totalW = barCount * (barWidth + spacing);
+    const availableW = canvasWidth * (vis.spectrumWidth ? vis.spectrumWidth / 100 : 0.72);
+    const spacing = Math.max(2, (availableW - barCount * barWidth) / Math.max(1, barCount - 1));
+    const totalW = barCount * barWidth + (barCount - 1) * spacing;
     const startX = -totalW / 2;
-    const baseLineY = 160;
+    const baseLineY = 0;
+    const sign = vis.invertDirection ? -1 : 1;
 
     for (let i = 0; i < barCount; i++) {
       const normalizedIndex = vis.mirror
@@ -1960,7 +2137,7 @@ export class CanvasRenderer {
         : i / barCount;
 
       const rawVal = this.getProcessedFrequency(freq, normalizedIndex, isPlaying, bassBoost, i * 0.3);
-      const height = Math.max(3, rawVal * maxBarHeight);
+      const height = Math.max(4, rawVal * maxBarHeight);
 
       const x = startX + i * (barWidth + spacing);
 
@@ -1974,21 +2151,318 @@ export class CanvasRenderer {
         cap.value = Math.max(0, cap.value - cap.velocity);
       }
 
+      const barY = sign > 0 ? baseLineY - height : baseLineY;
+
       // Draw vertical bar
-      ctx.fillStyle = this.getColorForBar(ctx, vis, i, barCount, x, baseLineY - height, x, baseLineY);
+      ctx.fillStyle = this.getColorForBar(ctx, vis, i, barCount, x, barY, x, barY + height);
       ctx.beginPath();
       if (roundCaps) {
-        ctx.roundRect(x, baseLineY - height, barWidth, height, [barWidth / 2, barWidth / 2, 0, 0]);
+        ctx.roundRect(x, barY, barWidth, height, [barWidth / 2, barWidth / 2, 0, 0]);
       } else {
-        ctx.rect(x, baseLineY - height, barWidth, height);
+        ctx.rect(x, barY, barWidth, height);
       }
       ctx.fill();
 
       // Draw floating peak dot
       ctx.fillStyle = vis.accentColor || '#FFFFFF';
+      const capY = sign > 0 ? baseLineY - cap.value - 6 : baseLineY + cap.value + 4;
       ctx.beginPath();
-      ctx.roundRect(x, baseLineY - cap.value - 6, barWidth, 3, 1.5);
+      ctx.roundRect(x, capY, barWidth, 3, 1.5);
       ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  // 8. NEON PILLARS (Futuristic Pillar Towers with Laser Cap & Floor Reflection)
+  private drawNeonPillars(
+    ctx: CanvasRenderingContext2D,
+    vis: VisualizerConfig,
+    audioData: AudioFrequencyData,
+    isPlaying: boolean,
+    canvasWidth: number = 1920
+  ): void {
+    const { barCount, maxBarHeight, barWidth, glow, bassBoost } = vis;
+    const freq = audioData.frequencyData;
+
+    ctx.save();
+    if (glow > 0) {
+      ctx.shadowColor = vis.primaryColor;
+      ctx.shadowBlur = glow + (isPlaying ? audioData.bassEnergy * 14 : 0);
+    }
+
+    const availableW = canvasWidth * (vis.spectrumWidth ? vis.spectrumWidth / 100 : 0.72);
+    const spacing = Math.max(2, (availableW - barCount * barWidth) / Math.max(1, barCount - 1));
+    const totalW = barCount * barWidth + (barCount - 1) * spacing;
+    const startX = -totalW / 2;
+    const baseLineY = 0;
+    const sign = vis.invertDirection ? -1 : 1;
+
+    for (let i = 0; i < barCount; i++) {
+      const normalizedIndex = vis.mirror
+        ? (i < barCount / 2 ? (barCount / 2 - i) / (barCount / 2) : (i - barCount / 2) / (barCount / 2))
+        : i / barCount;
+
+      const rawVal = this.getProcessedFrequency(freq, normalizedIndex, isPlaying, bassBoost, i * 0.35);
+      const height = Math.max(6, rawVal * maxBarHeight);
+      const x = startX + i * (barWidth + spacing);
+      const barY = sign > 0 ? baseLineY - height : baseLineY;
+
+      // Main Pillar Body: vertical gradient from primary to accent
+      const grad = ctx.createLinearGradient(x, baseLineY, x, barY);
+      grad.addColorStop(0, `${vis.primaryColor}88`);
+      grad.addColorStop(0.65, vis.secondaryColor);
+      grad.addColorStop(1, vis.accentColor || '#FFFFFF');
+      ctx.fillStyle = grad;
+
+      ctx.beginPath();
+      ctx.roundRect(x, barY, barWidth, height, [barWidth / 2, barWidth / 2, 2, 2]);
+      ctx.fill();
+
+      // Laser Accent Cap floating at top
+      ctx.save();
+      ctx.shadowColor = vis.accentColor || '#FFFFFF';
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = '#FFFFFF';
+      const capY = sign > 0 ? barY - 4 : barY + height + 2;
+      ctx.beginPath();
+      ctx.roundRect(x - 1, capY, barWidth + 2, 2.5, 1);
+      ctx.fill();
+      ctx.restore();
+
+      // Subtle Cyber Floor Reflection (fading downwards)
+      if (sign > 0) {
+        const refH = height * 0.32;
+        const refGrad = ctx.createLinearGradient(x, baseLineY, x, baseLineY + refH);
+        refGrad.addColorStop(0, `${vis.primaryColor}44`);
+        refGrad.addColorStop(1, `${vis.primaryColor}00`);
+        ctx.fillStyle = refGrad;
+        ctx.beginPath();
+        ctx.rect(x, baseLineY + 2, barWidth, refH);
+        ctx.fill();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  // 9. LED SPECTRUM (Digital Segmented LED VU-Meter with Decay Peak Blocks)
+  private drawLedSpectrum(
+    ctx: CanvasRenderingContext2D,
+    vis: VisualizerConfig,
+    audioData: AudioFrequencyData,
+    isPlaying: boolean,
+    canvasWidth: number = 1920
+  ): void {
+    const { barCount, maxBarHeight, barWidth, glow, bassBoost } = vis;
+    const freq = audioData.frequencyData;
+
+    ctx.save();
+    if (glow > 0) {
+      ctx.shadowColor = vis.primaryColor;
+      ctx.shadowBlur = glow * 0.75;
+    }
+
+    while (this.peakCaps.length < barCount) {
+      this.peakCaps.push({ value: 0, velocity: 0 });
+    }
+
+    const availableW = canvasWidth * (vis.spectrumWidth ? vis.spectrumWidth / 100 : 0.72);
+    const spacing = Math.max(2, (availableW - barCount * barWidth) / Math.max(1, barCount - 1));
+    const totalW = barCount * barWidth + (barCount - 1) * spacing;
+    const startX = -totalW / 2;
+    const baseLineY = 0;
+
+    const blockHeight = Math.max(3, Math.min(7, Math.round(barWidth * 0.75)));
+    const blockGap = Math.max(1.5, Math.round(blockHeight * 0.3));
+    const step = blockHeight + blockGap;
+    const maxBlocks = Math.max(5, Math.floor(maxBarHeight / step));
+    const sign = vis.invertDirection ? -1 : 1;
+
+    for (let i = 0; i < barCount; i++) {
+      const normalizedIndex = vis.mirror
+        ? (i < barCount / 2 ? (barCount / 2 - i) / (barCount / 2) : (i - barCount / 2) / (barCount / 2))
+        : i / barCount;
+
+      const rawVal = this.getProcessedFrequency(freq, normalizedIndex, isPlaying, bassBoost, i * 0.3);
+      const activeBlocks = Math.min(maxBlocks, Math.round(rawVal * maxBlocks));
+      const x = startX + i * (barWidth + spacing);
+
+      // Peak block tracking
+      const cap = this.peakCaps[i];
+      if (activeBlocks > cap.value) {
+        cap.value = activeBlocks;
+        cap.velocity = 0;
+      } else {
+        cap.velocity += 0.18;
+        cap.value = Math.max(0, cap.value - cap.velocity);
+      }
+      const peakBlockIdx = Math.floor(cap.value);
+
+      // Draw each segmented LED block
+      for (let b = 0; b < maxBlocks; b++) {
+        const blockRatio = b / maxBlocks;
+        const isLit = b < activeBlocks;
+        const isPeak = b === peakBlockIdx && peakBlockIdx > 0;
+
+        let blockColor = vis.primaryColor;
+        if (blockRatio > 0.8) {
+          blockColor = vis.accentColor || '#FF0055';
+        } else if (blockRatio > 0.5) {
+          blockColor = vis.secondaryColor || '#FFCC00';
+        }
+
+        const blockY = sign > 0 ? baseLineY - (b + 1) * step : baseLineY + b * step;
+
+        if (isLit) {
+          ctx.fillStyle = blockColor;
+          ctx.beginPath();
+          ctx.roundRect(x, blockY, barWidth, blockHeight, 1);
+          ctx.fill();
+        } else if (isPeak) {
+          // Peak hold block
+          ctx.fillStyle = vis.accentColor || '#FFFFFF';
+          ctx.beginPath();
+          ctx.roundRect(x, blockY, barWidth, blockHeight, 1);
+          ctx.fill();
+        } else {
+          // Unlit faint background block
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
+          ctx.beginPath();
+          ctx.roundRect(x, blockY, barWidth, blockHeight, 1);
+          ctx.fill();
+        }
+      }
+    }
+
+    ctx.restore();
+  }
+
+  // 10. VOICE SOUNDWAVE (Symmetric Center Waveform - Podcast / Spotify Style)
+  private drawVoiceSoundwave(
+    ctx: CanvasRenderingContext2D,
+    vis: VisualizerConfig,
+    audioData: AudioFrequencyData,
+    isPlaying: boolean,
+    canvasWidth: number = 1920
+  ): void {
+    const { barCount, maxBarHeight, barWidth, roundCaps, glow, bassBoost } = vis;
+    const freq = audioData.frequencyData;
+
+    ctx.save();
+    if (glow > 0) {
+      ctx.shadowColor = vis.primaryColor;
+      ctx.shadowBlur = glow + (isPlaying ? audioData.bassEnergy * 16 : 0);
+    }
+
+    const availableW = canvasWidth * (vis.spectrumWidth ? vis.spectrumWidth / 100 : 0.72);
+    const spacing = Math.max(2, (availableW - barCount * barWidth) / Math.max(1, barCount - 1));
+    const totalW = barCount * barWidth + (barCount - 1) * spacing;
+    const startX = -totalW / 2;
+    const baseLineY = 0;
+
+    // Subtle horizontal baseline beam
+    ctx.strokeStyle = `${vis.primaryColor}44`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(startX - 12, baseLineY);
+    ctx.lineTo(startX + totalW + 12, baseLineY);
+    ctx.stroke();
+
+    for (let i = 0; i < barCount; i++) {
+      const normalizedIndex = vis.mirror
+        ? (i < barCount / 2 ? (barCount / 2 - i) / (barCount / 2) : (i - barCount / 2) / (barCount / 2))
+        : i / barCount;
+
+      const rawVal = this.getProcessedFrequency(freq, normalizedIndex, isPlaying, bassBoost, i * 0.35);
+      const halfH = Math.max(barWidth * 0.6, (rawVal * maxBarHeight) * 0.5);
+      const x = startX + i * (barWidth + spacing);
+
+      // Symmetric gradient from top to bottom
+      const grad = ctx.createLinearGradient(x, baseLineY - halfH, x, baseLineY + halfH);
+      grad.addColorStop(0, vis.accentColor || '#FFFFFF');
+      grad.addColorStop(0.5, vis.primaryColor);
+      grad.addColorStop(1, vis.secondaryColor);
+      ctx.fillStyle = grad;
+
+      ctx.beginPath();
+      if (roundCaps !== false) {
+        ctx.roundRect(x, baseLineY - halfH, barWidth, halfH * 2, barWidth / 2);
+      } else {
+        ctx.rect(x, baseLineY - halfH, barWidth, halfH * 2);
+      }
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  // 11. LASER NEEDLES (High-Density Ultra-Thin Frequency Lines with Soft Glow)
+  private drawLaserNeedles(
+    ctx: CanvasRenderingContext2D,
+    vis: VisualizerConfig,
+    audioData: AudioFrequencyData,
+    isPlaying: boolean,
+    canvasWidth: number = 1920
+  ): void {
+    const { barCount, maxBarHeight, glow, bassBoost } = vis;
+    const freq = audioData.frequencyData;
+
+    ctx.save();
+    if (glow > 0) {
+      ctx.shadowColor = vis.primaryColor;
+      ctx.shadowBlur = glow + 8;
+    }
+
+    // High density count
+    const count = Math.max(barCount, 64);
+    const needleW = Math.max(1, Math.min(3, vis.barWidth * 0.5));
+    const availableW = canvasWidth * (vis.spectrumWidth ? vis.spectrumWidth / 100 : 0.72);
+    const spacing = availableW / (count - 1);
+    const startX = -availableW / 2;
+    const baseLineY = 0;
+    const sign = vis.invertDirection ? -1 : 1;
+
+    const topPoints: { x: number; y: number }[] = [];
+
+    for (let i = 0; i < count; i++) {
+      const normalizedIndex = vis.mirror
+        ? (i < count / 2 ? (count / 2 - i) / (count / 2) : (i - count / 2) / (count / 2))
+        : i / count;
+
+      const rawVal = this.getProcessedFrequency(freq, normalizedIndex, isPlaying, bassBoost, i * 0.25);
+      const height = Math.max(3, rawVal * maxBarHeight);
+      const x = startX + i * spacing;
+      const topY = sign > 0 ? baseLineY - height : baseLineY + height;
+      topPoints.push({ x, y: topY });
+
+      // Needle line
+      ctx.strokeStyle = this.getColorForBar(ctx, vis, i, count, x, baseLineY, x, topY);
+      ctx.lineWidth = needleW;
+      ctx.beginPath();
+      ctx.moveTo(x, baseLineY);
+      ctx.lineTo(x, topY);
+      ctx.stroke();
+
+      // Needle glowing tip dot
+      ctx.fillStyle = vis.accentColor || '#FFFFFF';
+      ctx.beginPath();
+      ctx.arc(x, topY, needleW + 0.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Faint trailing connecting laser line along the tips
+    if (topPoints.length > 1) {
+      ctx.save();
+      ctx.strokeStyle = `${vis.primaryColor}55`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(topPoints[0].x, topPoints[0].y);
+      for (let i = 1; i < topPoints.length; i++) {
+        ctx.lineTo(topPoints[i].x, topPoints[i].y);
+      }
+      ctx.stroke();
+      ctx.restore();
     }
 
     ctx.restore();
@@ -3047,8 +3521,22 @@ export class CanvasRenderer {
     { font: '900 {size}px "Anton", "Impact", sans-serif', isUpper: true, tilt: 0.035 },
     { font: 'bold {size}px "Courier New", monospace', isUpper: true, tilt: -0.02 },
     { font: '800 {size}px "Montserrat", sans-serif', isUpper: true, tilt: 0.025 },
-    { font: 'bold {size}px "Kanit", sans-serif', isUpper: false, tilt: 0.0 },
   ];
+
+  private getSubtitleFontFamily(font: string): string {
+    const clean = (font || 'Montserrat').replace(/['"]/g, '').trim();
+    const lower = clean.toLowerCase();
+    if (lower === 'impact') {
+      return '"Impact", "Anton", sans-serif';
+    }
+    if (lower === 'anton') {
+      return '"Anton", "Impact", sans-serif';
+    }
+    if (lower === 'bebas neue') {
+      return '"Bebas Neue", "Anton", sans-serif';
+    }
+    return `"${clean}", sans-serif`;
+  }
 
   private drawSubtitles(
     ctx: CanvasRenderingContext2D,
@@ -3189,86 +3677,104 @@ export class CanvasRenderer {
       fontFamily === 'Impact' ||
       fontFamily === 'Bebas Neue';
     const baseWeight = isAlreadyHeavy ? 'normal' : 'bold';
+    const resolvedFont = this.getSubtitleFontFamily(fontFamily);
 
-    ctx.font = `${baseWeight} ${fontSize}px "${fontFamily}", sans-serif`;
+    ctx.font = `${baseWeight} ${fontSize}px ${resolvedFont}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
     // --- SCREEN OVERFLOW PROTECTION: Smart Multi-line Text Wrapping ---
     const maxAllowedWidth = width * (sub.autoWrapWidth ? sub.autoWrapWidth / 100 : 0.84);
     
-    // Dynamic Word Spacing: In condensed fonts like Anton/Impact, ' ' advance is notoriously tiny (~0.15-0.2 * fontSize).
-    // When font is enlarged or heavy stroke/pop animations are used, words severely collide if spaceW isn't proportionally expanded.
+    // Dynamic Word Spacing: In condensed fonts like Anton/Impact, ' ' advance is notoriously tiny (~0.15-0.20 * fontSize).
+    // We enforce a healthy, tight baseline so words don't crash, but NEVER spread too far apart.
     const rawSpaceW = ctx.measureText(' ').width;
     const isCondensedFont =
       fontFamily === 'Anton' ||
       fontFamily === 'Impact' ||
-      fontFamily === 'Bebas Neue' ||
-      isRansom ||
-      isBrutalism ||
-      isTextBouncePop ||
-      isRandomJitter;
+      fontFamily === 'Bebas Neue';
     // Minimum comfortable word space based on font size:
-    const minSpaceRatio = isHormozi || isCondensedFont ? 0.42 : 0.30;
-    const proportionalSpace = fontSize * minSpaceRatio;
-    // Stroke padding allowance: thick outlines (e.g. 8-12px) expand on both sides of each word
-    const strokeMargin = Math.max(sub.strokeWidth ?? 4, 4) * 0.8;
+    const targetSpaceRatio = isCondensedFont ? 0.19 : 0.21;
+    let baseSpace = Math.max(rawSpaceW, Math.round(fontSize * targetSpaceRatio));
+    if (isCondensedFont) {
+      baseSpace = Math.min(baseSpace, Math.round(fontSize * 0.24));
+    } else {
+      baseSpace = Math.min(baseSpace, Math.round(fontSize * 0.28));
+    }
+    // Stroke padding allowance: only if outline is heavier than normal (> 4px)
+    const strokeWidth = sub.strokeWidth ?? 4;
+    const strokeMargin = strokeWidth > 4 ? Math.min(3, Math.round((strokeWidth - 4) * 0.2)) : 0;
     // Pop bounce buffer for kinetic styles so enlarged active word doesn't collide with neighbors
-    const kineticBuffer = isHormozi ? Math.max(6, fontSize * 0.12) : 0;
-    const extraStyleSpace = isRansom ? Math.max(22, fontSize * 0.52) : isBrutalism ? Math.max(8, fontSize * 0.22) : 0;
-    const userSpacing = typeof sub.wordSpacing === 'number' ? sub.wordSpacing : 0;
+    const kineticBuffer = isHormozi ? Math.min(2, Math.max(1, Math.round(fontSize * 0.02))) : 0;
+    const extraStyleSpace = isRansom ? Math.min(10, Math.round(fontSize * 0.12)) : isBrutalism ? Math.min(5, Math.round(fontSize * 0.06)) : 0;
     
-    const spaceW = Math.max(rawSpaceW, proportionalSpace) + strokeMargin + kineticBuffer + extraStyleSpace + userSpacing;
+    // User manual adjustment from slider, safely clamped so it never causes huge gaps:
+    const rawUserSpacing = typeof sub.wordSpacing === 'number' ? sub.wordSpacing : 0;
+    const userSpacing = Math.max(-6, Math.min(8, rawUserSpacing));
+    
+    // Hard clamp spaceW: condensed fonts max ~0.26 em (~11px @ 44px), standard fonts max ~0.32 em (~14px @ 44px)
+    const maxAllowedSpace = isCondensedFont ? Math.round(fontSize * 0.26) : Math.round(fontSize * 0.32);
+    const spaceW = Math.max(6, Math.min(maxAllowedSpace, Math.round(baseSpace + strokeMargin + kineticBuffer + extraStyleSpace + userSpacing)));
 
-    // Prepare Word Data: ensure words array ALWAYS matches the latest edited text!
+    // Prepare Word Data: ensure words array ALWAYS matches the latest edited text and words are trimmed!
     let words = activeSeg.words;
     const rawWords = text.trim().split(/\s+/).filter(Boolean);
-    const wordsJoined = words ? words.map((w) => w.word).join(' ').trim() : '';
+    const wordsJoined = words ? words.map((w) => (w.word || '').trim()).join(' ').trim() : '';
     if (!words || words.length === 0 || wordsJoined !== text.trim()) {
       const dur = Math.max(0.1, segDur);
       const wDur = dur / Math.max(1, rawWords.length);
       words = rawWords.map((w, i) => ({
-        word: w,
+        word: w.trim(),
         start: Number((activeSeg.start + i * wDur).toFixed(3)),
         end: Number((activeSeg.start + (i + 1) * wDur).toFixed(3)),
       }));
       // Keep segment words in sync so highlight/karaoke is accurate
       activeSeg.words = words;
+    } else {
+      // Ensure all words are trimmed clean of any leading/trailing spaces
+      words = words.map((w) => ({ ...w, word: (w.word || '').trim() }));
     }
 
     // Cache measured words so ctx.measureText is NOT called repeatedly 60 times a second
     // Cache key MUST include segment text, timestamps, word count, and translation so any subtitle edit immediately invalidates cache!
-    const wmKey = `${fontSize}_${fontFamily}_${sub.style}_${spaceW}_${sub.strokeWidth ?? 4}_${activeSeg.text}_${words.map((w) => w.word).join(' ')}_${activeSeg.start}_${activeSeg.end}_${activeSeg.words?.length || 0}_${activeSeg.translation || ''}`;
+    const primaryFontName = resolvedFont.split(',')[0].replace(/['"]/g, '').trim();
+    const isFontReady = typeof document !== 'undefined' && document.fonts && document.fonts.check
+      ? (document.fonts.check(`${baseWeight} ${fontSize}px "${primaryFontName}"`) ||
+         document.fonts.check(`normal ${fontSize}px "${primaryFontName}"`))
+      : true;
+
+    const wmKey = `${fontSize}_${fontFamily}_${sub.style}_${spaceW}_${sub.strokeWidth ?? 4}_${activeSeg.text}_${words.map((w) => (w.word || '').trim()).join(' ')}_${activeSeg.start}_${activeSeg.end}_${activeSeg.words?.length || 0}_${activeSeg.translation || ''}`;
     let wm = (activeSeg as any).__wmCacheKey === wmKey ? (activeSeg as any).__wmCache : null;
-    if (!wm) {
+    if (!wm || !isFontReady) {
       wm = words.map((w, idx) => {
-        let displayW = isHormozi ? w.word.toUpperCase() : w.word;
-        let wordFont = `${baseWeight} ${fontSize}px "${fontFamily}", sans-serif`;
+        const cleanWord = (w.word || '').trim();
+        let displayW = isHormozi ? cleanWord.toUpperCase() : cleanWord;
+        let wordFont = `${baseWeight} ${fontSize}px ${resolvedFont}`;
         let ransomCfg: any = undefined;
         let kineticCfg: any = undefined;
 
         if (isRansom) {
-          const charSum = w.word.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+          const charSum = cleanWord.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
           ransomCfg = CanvasRenderer.RANSOM_PALETTES[(charSum + idx) % CanvasRenderer.RANSOM_PALETTES.length];
           const fb = ransomCfg.fallback || 'sans-serif';
           wordFont = `${ransomCfg.isItalic ? 'italic ' : ''}bold ${fontSize}px "${ransomCfg.fontName}", ${fb}`;
-          displayW = idx % 2 === 0 ? w.word.toUpperCase() : w.word;
+          displayW = idx % 2 === 0 ? cleanWord.toUpperCase() : cleanWord;
         } else if (isKineticTypo) {
-          const charSum = w.word.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+          const charSum = cleanWord.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
           kineticCfg = CanvasRenderer.KINETIC_FONT_VARIANTS[(charSum + idx) % CanvasRenderer.KINETIC_FONT_VARIANTS.length];
           wordFont = kineticCfg.font.replace('{size}', String(fontSize));
-          displayW = kineticCfg.isUpper ? w.word.toUpperCase() : w.word;
+          displayW = kineticCfg.isUpper ? cleanWord.toUpperCase() : cleanWord;
         } else if (isBrutalism) {
-          displayW = w.word.split('').map((c, ci) => (ci % 2 === 0 ? c.toUpperCase() : c.toLowerCase())).join('');
+          displayW = cleanWord.split('').map((c, ci) => (ci % 2 === 0 ? c.toUpperCase() : c.toLowerCase())).join('');
           wordFont = `normal ${fontSize}px "Impact", "Anton", sans-serif`;
         } else if (isTextBouncePop) {
-          displayW = w.word.toUpperCase();
+          displayW = cleanWord.toUpperCase();
           wordFont = `normal ${fontSize}px "Anton", "Impact", sans-serif`;
         } else if (isWaveWarp) {
-          displayW = w.word;
-          wordFont = `bold ${fontSize}px "${fontFamily || 'Montserrat'}", sans-serif`;
+          displayW = cleanWord;
+          wordFont = `bold ${fontSize}px ${this.getSubtitleFontFamily(fontFamily || 'Montserrat')}`;
         } else if (isRandomJitter) {
-          displayW = idx % 2 === 0 ? w.word.toUpperCase() : w.word;
+          displayW = idx % 2 === 0 ? cleanWord.toUpperCase() : cleanWord;
           wordFont = `900 ${fontSize}px "Rubik", "Anton", sans-serif`;
         }
 
@@ -3276,6 +3782,7 @@ export class CanvasRenderer {
         const ww = ctx.measureText(displayW).width;
         return {
           ...w,
+          word: cleanWord,
           displayWord: displayW,
           width: ww,
           wordFont,
@@ -3283,37 +3790,51 @@ export class CanvasRenderer {
           kineticCfg,
         };
       });
-      (activeSeg as any).__wmCache = wm;
-      (activeSeg as any).__wmCacheKey = wmKey;
+      if (isFontReady) {
+        (activeSeg as any).__wmCache = wm;
+        (activeSeg as any).__wmCacheKey = wmKey;
+      }
     }
 
     // Determine words to display:
-    // If singleLineSentenceMode is active (default: true), we ALWAYS display the complete sentence in 1 clean line
+    // In vertical format (9:16 portrait) or when long sentences (> 4 words) are rendered,
+    // prevent words from shrinking into tiny miniature text or clipping past screen borders.
+    // Display in punchy, highly-readable chunks of 3-4 words that advance smoothly with the singing!
+    const isVertical = height > width;
     const isSingleLine = sub.singleLineSentenceMode !== false;
     let displayWords = wm;
-    if (!isSingleLine && isHormozi && wm.length > 4) {
+
+    const targetWordsPerChunk = Math.max(2, Math.min(6, sub.maxWordsPerLine || (isVertical ? 4 : 4)));
+    const shouldChunk = (isVertical && wm.length > targetWordsPerChunk) || (!isSingleLine && (isHormozi || isVertical) && wm.length > 4);
+
+    if (shouldChunk) {
       const activeWIdx = wm.findIndex((w: any) => t >= w.start && t <= w.end);
-      const validIdx = activeWIdx !== -1 ? activeWIdx : 0;
-      const chunkSize = Math.max(2, Math.min(6, sub.maxWordsPerLine || 3));
-      const chunkStart = Math.floor(validIdx / chunkSize) * chunkSize;
-      displayWords = wm.slice(chunkStart, chunkStart + chunkSize);
+      const validIdx = activeWIdx !== -1 ? activeWIdx : (t > wm[wm.length - 1].end ? wm.length - 1 : 0);
+      const chunkStart = Math.floor(validIdx / targetWordsPerChunk) * targetWordsPerChunk;
+      displayWords = wm.slice(chunkStart, chunkStart + targetWordsPerChunk);
     }
 
     // Wrap words into rows, or auto-fit sentence into 1 single line
     const lines: { words: typeof displayWords; width: number; fitScale: number }[] = [];
+    const totalWordsW = displayWords.reduce((sum: number, w: any) => sum + w.width, 0) + Math.max(0, displayWords.length - 1) * spaceW;
 
-    if (isSingleLine) {
-      const totalWordsW = displayWords.reduce((sum: number, w: any) => sum + w.width, 0) + Math.max(0, displayWords.length - 1) * spaceW;
-      const fitScale = totalWordsW > maxAllowedWidth ? Math.max(0.55, maxAllowedWidth / totalWordsW) : 1.0;
+    // Keep single line only if it comfortably fits without drastic downscaling (>= 75% size) and not vertical mode with multiple words
+    const canFitSingleCleanly = !isVertical && (totalWordsW <= maxAllowedWidth || (maxAllowedWidth / totalWordsW) >= 0.75);
+
+    if (isSingleLine && canFitSingleCleanly) {
+      const fitScale = totalWordsW > maxAllowedWidth ? Math.min(1.0, maxAllowedWidth / totalWordsW) : 1.0;
       lines.push({ words: displayWords, width: totalWordsW, fitScale });
     } else {
+      // Smart row wrapping (ensures each line is within maxAllowedWidth without clipping):
       let curLine: typeof displayWords = [];
       let curLineW = 0;
 
       for (const w of displayWords) {
         const wordWithSpace = w.width + spaceW;
         if (curLine.length > 0 && curLineW + w.width > maxAllowedWidth) {
-          lines.push({ words: curLine, width: curLineW - spaceW, fitScale: 1.0 });
+          const lw = curLineW - spaceW;
+          const lineScale = lw > maxAllowedWidth ? Math.min(1.0, maxAllowedWidth / lw) : 1.0;
+          lines.push({ words: curLine, width: lw, fitScale: lineScale });
           curLine = [w];
           curLineW = wordWithSpace;
         } else {
@@ -3322,7 +3843,9 @@ export class CanvasRenderer {
         }
       }
       if (curLine.length > 0) {
-        lines.push({ words: curLine, width: curLineW - spaceW, fitScale: 1.0 });
+        const lw = curLineW - spaceW;
+        const lineScale = lw > maxAllowedWidth ? Math.min(1.0, maxAllowedWidth / lw) : 1.0;
+        lines.push({ words: curLine, width: lw, fitScale: lineScale });
       }
     }
 
@@ -3937,7 +4460,7 @@ export class CanvasRenderer {
       const tfs = sub.translationFontSize || Math.round(fontSize * 0.6);
       const tpy = startLineY + totalLinesHeight + tfs * 0.4;
       ctx.save();
-      ctx.font = `500 ${tfs}px "${fontFamily}", sans-serif`;
+      ctx.font = `500 ${tfs}px ${this.getSubtitleFontFamily(fontFamily)}`;
       const transW = ctx.measureText(translationText).width;
       const transFit = transW > maxAllowedWidth ? Math.max(0.6, maxAllowedWidth / transW) : 1.0;
       if (transFit < 1.0) {
@@ -3965,7 +4488,7 @@ export class CanvasRenderer {
       const npy = startLineY + totalLinesHeight + (hasTranslation ? fontSize * 1.3 : fontSize * 0.8);
       ctx.save();
       ctx.globalAlpha = na;
-      ctx.font = `600 ${nfs}px "${fontFamily}", sans-serif`;
+      ctx.font = `600 ${nfs}px ${this.getSubtitleFontFamily(fontFamily)}`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
       ctx.fillText(nextSeg.text, posX, npy);
@@ -3995,7 +4518,7 @@ export class CanvasRenderer {
     if (!videoUrl) return;
 
     const video = this.preloadVideo(videoUrl);
-    if (!video || video.readyState < 2) return;
+    if (!video || (video.readyState < 1 && (video.videoWidth || 0) === 0)) return;
 
     if (isPlaying) {
       if (video.paused) video.play().catch(() => {});
@@ -4129,12 +4652,23 @@ export class CanvasRenderer {
     const offset = Math.max(1, Math.floor(fx.intensity * (bass * 0.7 + (isBeat ? 0.6 : 0))));
     if (offset <= 0) return;
 
-    ctx.save();
-    ctx.globalCompositeOperation = 'screen';
-    ctx.globalAlpha = 0.22;
-    ctx.drawImage(ctx.canvas, -offset, 0, width, height);
-    ctx.drawImage(ctx.canvas, offset, 0, width, height);
-    ctx.restore();
+    try {
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      const numFringes = Math.min(8, Math.floor(offset * 0.7) + 1);
+      for (let f = 0; f < numFringes; f++) {
+        const fy = (f * 137.5 + offset * 11) % height;
+        const fH = 2 + (f % 3) * 2;
+        ctx.fillStyle = 'rgba(255, 0, 80, 0.22)';
+        ctx.fillRect(-offset, fy, width + offset * 2, fH);
+        ctx.fillStyle = 'rgba(0, 240, 255, 0.22)';
+        ctx.fillRect(offset, fy + fH, width + offset * 2, fH);
+      }
+    } catch {
+      // ignore safely
+    } finally {
+      ctx.restore();
+    }
   }
 
   private drawVhsOverlay(
@@ -4200,8 +4734,29 @@ export class CanvasRenderer {
     let effectIntensity = 0.75;
     let fadeFactor = 1.0;
 
-    // 1. Check if current active multi-image slide has a visual effect
-    if (bg.multiImageSlides && bg.multiImageSlides.length > 0) {
+    // 1. TOP LAYER PRIORITY: Check if active B-Roll clip is playing at current time
+    if (bg.bRoll?.enabled && bg.bRoll.clips && bg.bRoll.clips.length > 0) {
+      const broll = bg.bRoll.clips.find(
+        (c) => currentTime >= c.startSec && currentTime < c.endSec
+      );
+      if (broll && broll.visualEffect && broll.visualEffect !== 'none') {
+        activeEffect = broll.visualEffect;
+        effectIntensity = broll.visualEffectIntensity ?? 0.75;
+        const brollDur = Math.max(0.4, broll.endSec - broll.startSec);
+        const fadeWindow = Math.min(0.5, Math.max(0.2, brollDur * 0.2));
+        const timeFromStart = currentTime - broll.startSec;
+        const timeToEnd = broll.endSec - currentTime;
+        const pIn = Math.max(0, Math.min(1, timeFromStart / fadeWindow));
+        const pOut = Math.max(0, Math.min(1, timeToEnd / fadeWindow));
+        fadeFactor = Math.min(
+          0.5 - 0.5 * Math.cos(pIn * Math.PI),
+          0.5 - 0.5 * Math.cos(pOut * Math.PI)
+        );
+      }
+    }
+
+    // 2. MULTI-IMAGE SLIDE: Check active multi-image slide if B-Roll has not overridden effect
+    if (activeEffect === 'none' && bg.multiImageSlides && bg.multiImageSlides.length > 0) {
       const slides = bg.multiImageSlides;
       const currIdx = slides.findIndex(
         (s) => currentTime >= s.startSec && currentTime < s.endSec
@@ -4248,28 +4803,14 @@ export class CanvasRenderer {
       }
     }
 
-    // 2. Check if active B-Roll clip has a visual effect
-    if (activeEffect === 'none' && bg.bRoll?.enabled && bg.bRoll.clips) {
-      const broll = bg.bRoll.clips.find(
-        (c) => currentTime >= c.startSec && currentTime < c.endSec && c.visualEffect && c.visualEffect !== 'none'
-      );
-      if (broll) {
-        activeEffect = broll.visualEffect!;
-        effectIntensity = broll.visualEffectIntensity ?? 0.75;
-        const brollDur = Math.max(0.4, broll.endSec - broll.startSec);
-        const fadeWindow = Math.min(0.5, Math.max(0.2, brollDur * 0.2));
-        const timeFromStart = currentTime - broll.startSec;
-        const timeToEnd = broll.endSec - currentTime;
-        const pIn = Math.max(0, Math.min(1, timeFromStart / fadeWindow));
-        const pOut = Math.max(0, Math.min(1, timeToEnd / fadeWindow));
-        fadeFactor = Math.min(
-          0.5 - 0.5 * Math.cos(pIn * Math.PI),
-          0.5 - 0.5 * Math.cos(pOut * Math.PI)
-        );
-      }
+    // 3. BACKGROUND FALLBACK: Custom Image / Video Background effect (also covers B-Roll if B-Roll has no override)
+    if (activeEffect === 'none' && bg.type === 'custom_image' && bg.customImageVisualEffect && bg.customImageVisualEffect !== 'none') {
+      activeEffect = bg.customImageVisualEffect;
+      effectIntensity = bg.customImageVisualEffectIntensity ?? 0.75;
+      fadeFactor = 1.0;
     }
 
-    // 3. Check if dedicated Timeline FX clip is active at current time
+    // 4. TIMELINE FX CLIPS: Check if dedicated Timeline FX clip is active at current time
     if (activeEffect === 'none' && bg.timelineFxClips && bg.timelineFxClips.length > 0) {
       const fx = bg.timelineFxClips.find(
         (clip) => currentTime >= clip.startSec && currentTime < clip.endSec && clip.effect !== 'none'
@@ -4311,6 +4852,8 @@ export class CanvasRenderer {
 
   /**
    * ⚡ EFEK DISTORSI (Camera Glitch, Slice Displacement & Chromatic Split)
+   * Menggunakan glitch prosedural modern non-destruktif:
+   * 100% aman untuk layer video, tidak menutupi video, dan tidak merusak tekstur GPU.
    */
   private drawDistortionEffect(
     ctx: CanvasRenderingContext2D,
@@ -4323,83 +4866,87 @@ export class CanvasRenderer {
     fadeFactor: number = 1.0
   ): void {
     if (intensity <= 0.005) return;
-    ctx.save();
-    const frameSeed = Math.floor(currentTime * 16);
-    const pseudoRand = (n: number) => {
-      const x = Math.sin(frameSeed * 997.1 + n * 133.7) * 43758.5453;
-      return Math.abs(x - Math.floor(x));
-    };
+    try {
+      ctx.save();
+      const frameSeed = Math.floor(currentTime * 18);
+      const pseudoRand = (n: number) => {
+        const x = Math.sin(frameSeed * 997.1 + n * 133.7) * 43758.5453;
+        return Math.abs(x - Math.floor(x));
+      };
 
-    const glitchPower = Math.min(1.8, intensity * (1 + (isPlaying ? bass * 0.4 : 0)));
+      const glitchPower = Math.min(1.8, intensity * (1 + (isPlaying ? bass * 0.45 : 0)));
+      const activeFade = fadeFactor * intensity;
 
-    // A. Horizontal Slice Displacement Glitch (scaled by fadeFactor)
-    const numSlices = Math.floor((3 + pseudoRand(1) * 7 * glitchPower) * fadeFactor);
-    const cvsW = ctx.canvas.width;
-    const cvsH = ctx.canvas.height;
-    const scaleY = cvsH / height;
+      // A. Horizontal Chromatic Glitch Slice Bands (Irisan Glitch Tanpa Menutupi Video)
+      const numSlices = Math.floor((3 + pseudoRand(1) * 5 * glitchPower) * fadeFactor);
+      for (let i = 0; i < numSlices; i++) {
+        const sliceY = pseudoRand(i * 11) * height;
+        const sliceH = Math.max(3, (4 + pseudoRand(i * 17) * 22 * glitchPower));
+        const maxOffset = (35 * glitchPower) * (width / 1280) * fadeFactor;
+        const offsetX = (pseudoRand(i * 23) - 0.5) * 2 * maxOffset;
 
-    for (let i = 0; i < numSlices; i++) {
-      const sliceY = pseudoRand(i * 11) * height;
-      const sliceH = 8 + pseudoRand(i * 17) * 40 * glitchPower;
-      const maxOffset = (28 * glitchPower) * (width / 1280) * fadeFactor;
-      const offsetX = (pseudoRand(i * 23) - 0.5) * 2 * maxOffset;
+        if (Math.abs(offsetX) > 1.5) {
+          // 1. Red / Magenta Chromatic Fringe Strip along slice
+          ctx.fillStyle = `rgba(255, 20, 90, ${0.32 * activeFade})`;
+          ctx.fillRect(Math.max(0, offsetX), sliceY, width, Math.max(1.5, sliceH * 0.4));
 
-      if (Math.abs(offsetX) > 1) {
-        try {
-          const sy = Math.max(0, Math.floor(sliceY * scaleY));
-          const sh = Math.min(Math.floor(sliceH * scaleY), cvsH - sy);
-          if (sh > 0) {
-            ctx.drawImage(
-              ctx.canvas,
-              0,
-              sy,
-              cvsW,
-              sh,
-              offsetX,
-              Math.max(0, sliceY),
-              width,
-              Math.min(sliceH, height - sliceY)
-            );
+          // 2. Cyan / Neon Blue Chromatic Fringe Strip along slice
+          ctx.fillStyle = `rgba(0, 240, 255, ${0.32 * activeFade})`;
+          ctx.fillRect(Math.max(0, -offsetX), sliceY + sliceH * 0.5, width, Math.max(1.5, sliceH * 0.4));
+
+          // 3. Digital Glitch Noise Blocks inside slice
+          const numBlocks = Math.floor(2 + pseudoRand(i * 31) * 4);
+          for (let b = 0; b < numBlocks; b++) {
+            const bx = pseudoRand(b * 43 + i) * width;
+            const bw = 15 + pseudoRand(b * 53 + i) * 60 * glitchPower;
+            ctx.fillStyle = pseudoRand(b + i) > 0.5
+              ? `rgba(0, 255, 240, ${0.22 * activeFade})`
+              : `rgba(255, 255, 255, ${0.28 * activeFade})`;
+            ctx.fillRect(bx, sliceY, bw, sliceH);
           }
-        } catch {
-          // ignore canvas self-draw edge cases
         }
       }
-    }
 
-    // B. RGB Chromatic Displacement Shifting (scaled by fadeFactor)
-    const rgbOffset = Math.round(10 * glitchPower * (width / 1280) * fadeFactor);
-    if (rgbOffset > 1) {
-      try {
-        ctx.save();
-        ctx.globalCompositeOperation = 'screen';
-        ctx.globalAlpha = 0.35 * intensity;
+      // B. Fine Chromatic Scanline Aberration Fringes (Garis scanline tipis kromatik)
+      const numFringes = Math.floor(4 * glitchPower * fadeFactor);
+      for (let f = 0; f < numFringes; f++) {
+        const fy = pseudoRand(f * 67 + 3) * height;
+        const fThickness = 1.2 + pseudoRand(f * 73) * 1.5;
+        const fShift = (pseudoRand(f * 89) - 0.5) * 16 * glitchPower;
 
-        // Red channel shift
-        ctx.fillStyle = `rgba(255, 0, 60, ${0.4 * fadeFactor})`;
-        ctx.fillRect(0, 0, width, height);
-        ctx.drawImage(ctx.canvas, 0, 0, cvsW, cvsH, rgbOffset, 0, width, height);
+        ctx.fillStyle = `rgba(255, 0, 70, ${0.25 * activeFade})`;
+        ctx.fillRect(fShift, fy, width, fThickness);
 
-        // Cyan channel shift
-        ctx.fillStyle = `rgba(0, 240, 255, ${0.35 * fadeFactor})`;
-        ctx.fillRect(0, 0, width, height);
-        ctx.drawImage(ctx.canvas, 0, 0, cvsW, cvsH, -rgbOffset, 0, width, height);
-        ctx.restore();
-      } catch {
-        // ignore
+        ctx.fillStyle = `rgba(0, 245, 255, ${0.25 * activeFade})`;
+        ctx.fillRect(-fShift, fy + fThickness, width, fThickness);
       }
+
+      // C. Sweeping Glitch Scanline Bar (Berkas sinar glitch pemindai)
+      const scanBarY = (currentTime * 360) % height;
+      const barH = Math.max(2, 4 * glitchPower);
+      const scanGrad = ctx.createLinearGradient(0, scanBarY, 0, scanBarY + barH);
+      scanGrad.addColorStop(0, `rgba(0, 240, 255, 0)`);
+      scanGrad.addColorStop(0.5, `rgba(255, 255, 255, ${0.18 * activeFade})`);
+      scanGrad.addColorStop(1, `rgba(255, 0, 90, 0)`);
+      ctx.fillStyle = scanGrad;
+      ctx.fillRect(0, scanBarY, width, barH);
+
+      // D. Bass Punch Micro-Pulse (Sentakan kilau tipis saat bass drop)
+      if (isPlaying && bass > 0.45 && activeFade > 0.1) {
+        const pulseAlpha = Math.min(0.08, (bass - 0.45) * 0.18 * activeFade);
+        ctx.fillStyle = `rgba(0, 240, 255, ${pulseAlpha})`;
+        ctx.fillRect(0, 0, width, height);
+      }
+    } catch {
+      // safe fallback
+    } finally {
+      ctx.restore();
     }
-
-    // C. Horizontal Glitch Scanline Bar (scaled by intensity)
-    const scanBarY = (currentTime * 320) % height;
-    ctx.fillStyle = `rgba(255, 255, 255, ${0.12 * intensity})`;
-    ctx.fillRect(0, scanBarY, width, 5 * glitchPower);
-
-    ctx.restore();
   }
 
   /**
    * 📼 EFEK KAMERA JADUL (Vintage 8mm Film, Sepia Tone, Gate Weave & Projector Flicker)
+   * Menjaga video tetap terlihat jelas dengan grading transparan non-destruktif.
    */
   private drawVintageCameraEffect(
     ctx: CanvasRenderingContext2D,
@@ -4410,66 +4957,77 @@ export class CanvasRenderer {
     fadeFactor: number = 1.0
   ): void {
     if (intensity <= 0.005) return;
-    ctx.save();
-    // Projector runs at ~16-18 fps
-    const filmFrame = Math.floor(currentTime * 18);
-    const frameNoise = Math.sin(filmFrame * 453.13);
+    try {
+      ctx.save();
+      // Projector runs at ~16-18 fps
+      const filmFrame = Math.floor(currentTime * 18);
+      const frameNoise = Math.sin(filmFrame * 453.13);
+      const activeFade = fadeFactor * intensity;
 
-    // A. Warm Sepia / Vintage Amber Color Tone (fades smoothly in and out)
-    ctx.globalCompositeOperation = 'color';
-    ctx.fillStyle = `rgba(215, 160, 90, ${0.22 * fadeFactor})`;
-    ctx.fillRect(0, 0, width, height);
+      // A. Warm Sepia / Vintage Amber Color Tone (Grading lembut transparan)
+      ctx.save();
+      try {
+        ctx.globalCompositeOperation = 'overlay';
+        ctx.fillStyle = `rgba(200, 145, 75, ${0.14 * activeFade})`;
+        ctx.fillRect(0, 0, width, height);
+      } catch {
+        // fallback
+      } finally {
+        ctx.restore();
+      }
 
-    ctx.globalCompositeOperation = 'overlay';
-    ctx.fillStyle = `rgba(180, 130, 60, ${0.14 * intensity})`;
-    ctx.fillRect(0, 0, width, height);
-    ctx.globalCompositeOperation = 'source-over';
-
-    // B. Projector Brightness Flicker (fades smoothly in and out)
-    const flicker = (Math.sin(filmFrame * 7.7) * 0.5 + Math.cos(filmFrame * 13.3) * 0.5) * 0.09 * intensity;
-    if (flicker > 0) {
-      ctx.fillStyle = `rgba(255, 245, 210, ${flicker})`;
+      // Soft ambient golden warmth
+      ctx.fillStyle = `rgba(235, 180, 100, ${0.06 * activeFade})`;
       ctx.fillRect(0, 0, width, height);
-    } else if (flicker < 0) {
-      ctx.fillStyle = `rgba(0, 0, 0, ${-flicker * 1.3})`;
+
+      // B. Projector Brightness Flicker (Kedipan halus proyektor)
+      const flicker = (Math.sin(filmFrame * 7.7) * 0.5 + Math.cos(filmFrame * 13.3) * 0.5) * 0.06 * intensity;
+      if (flicker > 0) {
+        ctx.fillStyle = `rgba(255, 245, 215, ${Math.min(0.05, flicker)})`;
+        ctx.fillRect(0, 0, width, height);
+      } else if (flicker < 0) {
+        ctx.fillStyle = `rgba(0, 0, 0, ${Math.min(0.05, -flicker * 0.8)})`;
+        ctx.fillRect(0, 0, width, height);
+      }
+
+      // C. Film Gate Flutter & Edge Jitter
+      const gateWeaveY = Math.round(frameNoise * 2.5 * intensity);
+      if (Math.abs(gateWeaveY) > 0) {
+        ctx.fillStyle = `rgba(0, 0, 0, ${0.06 * activeFade})`;
+        ctx.fillRect(0, 0, width, Math.abs(gateWeaveY) * 1.5);
+        ctx.fillRect(0, height - Math.abs(gateWeaveY) * 1.5, width, Math.abs(gateWeaveY) * 1.5);
+      }
+
+      // D. Vintage Vignette (Cakupan lembut agar video tidak tertutup di sudut)
+      const radius = Math.max(width, height) * 0.72;
+      const vignette = ctx.createRadialGradient(
+        width / 2,
+        height / 2,
+        radius * 0.42,
+        width / 2,
+        height / 2,
+        radius
+      );
+      vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      vignette.addColorStop(0.65, `rgba(20, 12, 5, ${0.18 * intensity})`);
+      vignette.addColorStop(1, `rgba(10, 5, 2, ${0.48 * intensity})`);
+      ctx.fillStyle = vignette;
       ctx.fillRect(0, 0, width, height);
+
+      // E. 8mm Film Grain (Titik bintik debu film)
+      ctx.fillStyle = `rgba(255, 255, 255, ${0.06 * intensity})`;
+      const grainSeed = Math.sin(filmFrame * 719.1);
+      const grainCount = Math.floor(40 * fadeFactor);
+      for (let i = 0; i < grainCount; i++) {
+        const gx = Math.abs((Math.sin(i * 17.3 + grainSeed) * 43758.54) % 1) * width;
+        const gy = Math.abs((Math.cos(i * 23.7 + grainSeed) * 23145.12) % 1) * height;
+        ctx.fillRect(gx, gy, 1.5, 1.5);
+      }
+    } catch {
+      // safe fallback
+    } finally {
+      ctx.restore();
     }
-
-    // C. Film Gate Flutter & Edge Jitter (kamera sedikit bergetar vertikal & horizontal khas proyektor kuno)
-    const gateWeaveY = Math.round(frameNoise * 3 * intensity);
-    if (Math.abs(gateWeaveY) > 0) {
-      ctx.fillStyle = `rgba(0, 0, 0, ${0.08 * intensity * fadeFactor})`;
-      ctx.fillRect(0, 0, width, Math.abs(gateWeaveY) * 2);
-      ctx.fillRect(0, height - Math.abs(gateWeaveY) * 2, width, Math.abs(gateWeaveY) * 2);
-    }
-
-    // D. Vintage Deep Curved Vignette (fades smoothly in and out)
-    const radius = Math.max(width, height) * 0.72;
-    const vignette = ctx.createRadialGradient(
-      width / 2,
-      height / 2,
-      radius * 0.42,
-      width / 2,
-      height / 2,
-      radius
-    );
-    vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
-    vignette.addColorStop(0.65, `rgba(20, 12, 5, ${0.35 * intensity})`);
-    vignette.addColorStop(1, `rgba(8, 4, 1, ${0.85 * intensity})`);
-    ctx.fillStyle = vignette;
-    ctx.fillRect(0, 0, width, height);
-
-    // E. 8mm Film Grain (mereda mulus ke 0)
-    ctx.fillStyle = `rgba(255, 255, 255, ${0.07 * intensity})`;
-    const grainSeed = Math.sin(filmFrame * 719.1);
-    const grainCount = Math.floor(45 * fadeFactor);
-    for (let i = 0; i < grainCount; i++) {
-      const gx = Math.abs((Math.sin(i * 17.3 + grainSeed) * 43758.54) % 1) * width;
-      const gy = Math.abs((Math.cos(i * 23.7 + grainSeed) * 23145.12) % 1) * height;
-      ctx.fillRect(gx, gy, 2, 2);
-    }
-
-    ctx.restore();
   }
 
   /**

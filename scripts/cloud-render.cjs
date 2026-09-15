@@ -121,6 +121,10 @@ async function main() {
     '.m4v': 'video/x-m4v',
     '.ogv': 'video/ogg',
     '.mkv': 'video/x-matroska',
+    '.woff': 'font/woff',
+    '.woff2': 'font/woff2',
+    '.ttf': 'font/ttf',
+    '.otf': 'font/otf',
   };
 
   const server = http.createServer((req, res) => {
@@ -128,9 +132,13 @@ async function main() {
     if (reqPath === '/' || reqPath === '/render.html') {
       reqPath = '/render.html';
     }
-    let filePath = path.join(distDir, reqPath);
+    const cleanReqPath = reqPath.replace(/^\/+/, '');
+    let filePath = path.join(distDir, cleanReqPath);
     if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-      filePath = path.join(rootDir, reqPath);
+      filePath = path.join(rootDir, cleanReqPath);
+    }
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+      filePath = path.resolve(cleanReqPath);
     }
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
       const ext = path.extname(filePath).toLowerCase();
@@ -232,7 +240,22 @@ async function main() {
   };
 
   const ensureLocalVideoFile = async (vidUrl) => {
+    if (!vidUrl || typeof vidUrl !== 'string') return null;
     if (localVideoMap.has(vidUrl)) return localVideoMap.get(vidUrl);
+
+    // Check candidate relative and absolute disk paths
+    const candidatePaths = [
+      path.resolve(vidUrl),
+      path.resolve('dist', vidUrl),
+      path.resolve(vidUrl.replace(/^\/+/, '')),
+    ];
+    for (const cPath of candidatePaths) {
+      if (fs.existsSync(cPath) && fs.statSync(cPath).isFile()) {
+        localVideoMap.set(vidUrl, cPath);
+        return cPath;
+      }
+    }
+
     if (vidUrl.startsWith('http://') || vidUrl.startsWith('https://')) {
       try {
         const vidFileName = `dist-render/remote_vid_${++inlineVidCounter}.mp4`;
@@ -332,10 +355,23 @@ async function main() {
         }
       }
     }
-    if (config.background.bRoll && Array.isArray(config.background.bRoll.clips)) {
-      for (const clip of config.background.bRoll.clips) {
+    const bRollConf = config.background?.bRoll || config.bRoll;
+    if (bRollConf && Array.isArray(bRollConf.clips)) {
+      if (!config.background.bRoll) {
+        config.background.bRoll = bRollConf;
+      }
+      for (const clip of bRollConf.clips) {
         if (clip && clip.url) {
-          const isVid = clip.mediaType === 'video' || isVideoExt(path.extname(clip.url.split('?')[0]).toLowerCase());
+          const cleanUrl = (clip.url || '').split('?')[0].toLowerCase();
+          const ext = path.extname(cleanUrl).toLowerCase();
+          const isVid =
+            clip.mediaType === 'video' ||
+            isVideoExt(ext) ||
+            clip.url.startsWith('data:video/') ||
+            cleanUrl.includes('video-uploads/') ||
+            cleanUrl.includes('broll_video') ||
+            cleanUrl.includes('/video/');
+
           clip.url = resolveMediaAsset(clip.url, isVid);
           if (isVid) {
             clip.mediaType = 'video';
@@ -344,6 +380,7 @@ async function main() {
               const frameSeq = await extractVideoFrames(diskPath, fps);
               if (frameSeq) {
                 clip.frameSequence = frameSeq;
+                console.log(`🎬 B-Roll video frame sequence generated: ${frameSeq.frameCount} frames @ ${fps} FPS for clip ${clip.id || clip.name || ''}`);
               }
             }
           }
@@ -489,28 +526,46 @@ async function main() {
   console.log(`📄 Loading render harness from http://127.0.0.1:${port}/render.html...`);
   await page.goto(`http://127.0.0.1:${port}/render.html`, { waitUntil: 'networkidle0', timeout: 30000 });
 
-  console.log('🔤 Waiting for Google Fonts & typography to be fully ready in browser context...');
-  await page.evaluate(async () => {
+  console.log('🔤 Waiting for Google Fonts, Local Fonts & typography to be fully ready in browser context...');
+  const fontStatus = await page.evaluate(async () => {
     const fontPreloads = [
-      'bold 46px "Playfair Display"',
-      'italic bold 46px "Playfair Display"',
-      'bold 46px "Anton"',
-      'bold 46px "Bebas Neue"',
+      // 400 / Normal weights (vital for Anton, Bebas Neue, Impact, Black Ops, Special Elite)
+      '400 46px "Anton"',
+      'normal 46px "Anton"',
+      '400 46px "Bebas Neue"',
+      'normal 46px "Bebas Neue"',
+      '400 46px "Impact"',
+      'normal 46px "Impact"',
+      '400 46px "Black Ops One"',
+      '400 46px "Special Elite"',
+      '400 46px "Inter"',
+      // 700 / 800 / 900 Bold weights
+      '700 46px "Impact"',
+      'bold 46px "Impact"',
+      'bold 46px "Montserrat"',
+      '800 46px "Montserrat"',
+      '900 46px "Montserrat"',
+      'bold 46px "Inter"',
+      '800 46px "Inter"',
+      'bold 46px "Kanit"',
+      '800 46px "Kanit"',
+      '900 46px "Kanit"',
+      'bold 46px "Rubik"',
+      '800 46px "Rubik"',
+      '900 46px "Rubik"',
+      'bold 46px "Poppins"',
+      '800 46px "Poppins"',
+      'bold 46px "Orbitron"',
+      '800 46px "Orbitron"',
+      'bold 46px "Cinzel"',
+      '900 46px "Cinzel"',
+      'bold 46px "Syne"',
+      '800 46px "Syne"',
+      'bold 46px "Syncopate"',
       'bold 46px "Courier Prime"',
       'italic bold 46px "Courier Prime"',
-      'bold 46px "Special Elite"',
-      'bold 46px "Montserrat"',
-      'bold 46px "Kanit"',
-      'italic bold 46px "Kanit"',
-      'bold 46px "Rubik"',
-      'bold 46px "Impact"',
-      'bold 46px "Inter"',
-      'bold 46px "Cinzel"',
-      'bold 46px "Black Ops One"',
-      'bold 46px "Orbitron"',
-      'bold 46px "Poppins"',
-      'bold 46px "Syne"',
-      'bold 46px "Syncopate"',
+      'bold 46px "Playfair Display"',
+      'italic bold 46px "Playfair Display"',
     ];
     if (document.fonts && document.fonts.load) {
       await Promise.allSettled(fontPreloads.map((f) => document.fonts.load(f)));
@@ -518,7 +573,19 @@ async function main() {
     if (document.fonts && document.fonts.ready) {
       await document.fonts.ready;
     }
+
+    // Return font verification map
+    const checks = {
+      Anton: document.fonts.check('400 46px "Anton"'),
+      Impact: document.fonts.check('400 46px "Impact"') || document.fonts.check('normal 46px "Impact"'),
+      BebasNeue: document.fonts.check('400 46px "Bebas Neue"'),
+      Montserrat: document.fonts.check('bold 46px "Montserrat"'),
+      Kanit: document.fonts.check('bold 46px "Kanit"'),
+      Rubik: document.fonts.check('bold 46px "Rubik"'),
+    };
+    return checks;
   });
+  console.log(`🔤 Font verification in browser:`, JSON.stringify(fontStatus));
 
   console.log('⚡ Initializing audio FFT analyzer and visualizer canvas in browser context...');
   const initSuccess = await page.evaluate(

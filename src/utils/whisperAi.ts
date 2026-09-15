@@ -81,46 +81,26 @@ export class WhisperAIService {
       }
     }
 
-    // 2. Fallback: Process root words array only
+    // 2. Fallback: Process root words array only (e.g. KoboiLLM Gateway or Whisper words-only response)
     if (result.words && Array.isArray(result.words) && result.words.length > 0) {
-      const segments: LyricSegment[] = [];
-      let curWords: LyricWord[] = [];
-      let curStart = 0;
+      const rawWords: LyricWord[] = result.words
+        .map((w: any) => ({
+          word: (w.word || '').trim(),
+          start: Math.round((Number(w.start) || 0) * 100) / 100,
+          end: Math.round((Number(w.end) || 0) * 100) / 100,
+        }))
+        .filter((w: LyricWord) => Boolean(w.word) && !/^[♪♫🎶\s]+$/.test(w.word));
 
-      result.words.forEach((w: any, wIdx: number) => {
-        const wordText = (w.word || '').trim();
-        if (!wordText || /^[♪♫🎶\s]+$/.test(wordText)) return;
-
-        const wStart = Math.round((Number(w.start) || 0) * 100) / 100;
-        const wEnd = Math.round((Number(w.end) || 0) * 100) / 100;
-
-        if (curWords.length === 0) {
-          curStart = wStart;
-        }
-
-        curWords.push({ word: wordText, start: wStart, end: wEnd });
-
-        const isLast = wIdx === result.words.length - 1;
-        const nextWord = result.words[wIdx + 1];
-        const hasPause = nextWord && Number(nextWord.start) - wEnd > 0.65;
-        const hasPunctuation = /[.?!,]$/.test(wordText);
-        const reachedMaxWords = curWords.length >= 7;
-
-        if (isLast || hasPause || (curWords.length >= 4 && hasPunctuation) || reachedMaxWords) {
-          const segEnd = wEnd;
-          const segText = curWords.map((cw) => cw.word).join(' ');
-          segments.push({
-            id: `${idPrefix}-words-${segments.length}-${Date.now()}`,
-            start: curStart,
-            end: segEnd,
-            text: segText,
-            words: [...curWords],
-          });
-          curWords = [];
-        }
-      });
-
-      if (segments.length > 0) return segments;
+      if (rawWords.length > 0) {
+        const dummySegment: LyricSegment = {
+          id: `${idPrefix}-stream-${Date.now()}`,
+          start: rawWords[0].start,
+          end: rawWords[rawWords.length - 1].end,
+          text: rawWords.map((w) => w.word).join(' '),
+          words: rawWords,
+        };
+        return this.reconstructSubtitlesBySentence([dummySegment], idPrefix);
+      }
     }
 
     // 3. Fallback: Plain text output evenly timed
@@ -889,12 +869,14 @@ export class WhisperAIService {
   }
 
   /**
-   * Reconstructs lyric segments into complete, grammatical sentences ending with punctuation,
-   * formatted for clean single-line display with strictly non-colliding continuous flow.
+   * Reconstructs lyric segments into balanced, punchy 3-4 word lines and phrases,
+   * perfectly optimized for both vertical (9:16 Shorts/Reels/TikTok) and horizontal video,
+   * keeping verse and chorus boundaries intact without awkward orphan words or clipping.
    */
   public static reconstructSubtitlesBySentence(
     rawSegments: LyricSegment[],
-    idPrefix: string = 'sentence'
+    idPrefix: string = 'sentence',
+    options: { maxWords?: number; targetWords?: number } = {}
   ): LyricSegment[] {
     if (!rawSegments || rawSegments.length === 0) return [];
 
@@ -902,6 +884,7 @@ export class WhisperAIService {
       word: string;
       start: number;
       end: number;
+      isSegBoundary?: boolean;
     }
     const allWords: WordEntry[] = [];
 
@@ -909,13 +892,15 @@ export class WhisperAIService {
       if (!seg.text || !seg.text.trim()) continue;
       const cleanText = seg.text.trim();
       if (seg.words && seg.words.length > 0) {
-        for (const w of seg.words) {
+        for (let i = 0; i < seg.words.length; i++) {
+          const w = seg.words[i];
           const wt = (w.word || '').trim();
           if (wt) {
             allWords.push({
               word: wt,
               start: Number(w.start) || seg.start,
               end: Number(w.end) || seg.end,
+              isSegBoundary: i === seg.words.length - 1,
             });
           }
         }
@@ -928,6 +913,7 @@ export class WhisperAIService {
             word: sw,
             start: Number((seg.start + i * wDur).toFixed(3)),
             end: Number((seg.start + (i + 1) * wDur).toFixed(3)),
+            isSegBoundary: i === splitWords.length - 1,
           });
         });
       }
@@ -938,7 +924,9 @@ export class WhisperAIService {
     // Ensure words are chronologically sorted
     allWords.sort((a, b) => a.start - b.start);
 
-    // Group words into sentences ending with punctuation or speech pauses
+    const maxWords = options.maxWords || 4;
+
+    // Group words into natural, punchy 3-4 word song lines
     const reconstructed: LyricSegment[] = [];
     let currentWords: WordEntry[] = [];
     let currentStart = allWords[0].start;
@@ -953,32 +941,70 @@ export class WhisperAIService {
       const isLastWord = i === allWords.length - 1;
       const nextWord = allWords[i + 1];
 
-      // Terminal punctuation (. ? ! ; :) or clause comma
+      // Punctuation cues
       const endsWithTerminal = /[.?!;:]$/.test(w.word);
       const endsWithComma = /[,—–]$/.test(w.word);
 
-      // Audio pause to next word
-      const pauseToNext = nextWord ? nextWord.start - w.end : 0;
-      const hasLongPause = pauseToNext >= 0.55;
-      const hasMediumPause = pauseToNext >= 0.35;
+      // Audio pause to next word (in seconds)
+      const pauseToNext = nextWord ? Math.max(0, nextWord.start - w.end) : 0;
+
+      // Check if next word begins with an uppercase letter (Whisper capitalizes new phrases/verses/chorus)
+      const cleanNextWord = nextWord ? nextWord.word.replace(/^["'([{«]/, '').trim() : '';
+      const nextIsCapital = cleanNextWord.length > 0 && /^[A-Z0-9]/.test(cleanNextWord);
+      const isSimplePronoun = cleanNextWord === 'I' || cleanNextWord === 'A';
+      const isStrongCapital = nextIsCapital && (!isSimplePronoun || pauseToNext >= 0.16);
+
+      // Lookahead: count how many words remain until the next line/verse boundary (capital start, terminal punctuation, or prominent pause >= 0.22s)
+      let lookaheadWords = 0;
+      for (let j = i + 1; j < allWords.length; j++) {
+        const fw = allWords[j];
+        const prevW = allWords[j - 1];
+        const fwPause = Math.max(0, fw.start - prevW.end);
+        const fwClean = fw.word.replace(/^["'([{«]/, '').trim();
+        const fwIsCap = fwClean.length > 0 && /^[A-Z0-9]/.test(fwClean);
+        const prevEndsTerminal = /[.?!;:]$/.test(prevW.word);
+        if (fwPause >= 0.22 || fwIsCap || prevEndsTerminal) {
+          break;
+        }
+        lookaheadWords++;
+      }
 
       const wordCount = currentWords.length;
 
-      // Break condition:
-      // 1. Terminal punctuation (. ? ! ; :)
-      // 2. Significant pause in speech
-      // 3. Comma followed by a breath pause or after at least 4 words
-      // 4. Maximum comfortable words for a single horizontal line (>= 9 words)
-      // 5. Final word
-      const shouldBreak =
+      // Major boundary: new line/bait start (capital), pause between bars (>=0.20s), or terminal punctuation
+      const isMajorBoundary =
         isLastWord ||
         endsWithTerminal ||
-        hasLongPause ||
-        (endsWithComma && (hasMediumPause || wordCount >= 4)) ||
-        wordCount >= 9;
+        (isStrongCapital && wordCount >= 2) ||
+        (pauseToNext >= 0.20 && wordCount >= 2);
+
+      let shouldBreak = false;
+      if (isMajorBoundary) {
+        shouldBreak = true;
+      } else if (wordCount >= 3) {
+        // Natural break on comma if not leaving an isolated 1-word orphan
+        if (endsWithComma && lookaheadWords !== 1) {
+          shouldBreak = true;
+        } else if (wordCount >= maxWords) {
+          // If hard cap reached, don't leave 1 word orphan if lookahead is exactly 1 word
+          if (lookaheadWords === 1) {
+            shouldBreak = false; // allow 5th word so sentence ends cleanly as 5 words
+          } else {
+            shouldBreak = true;
+          }
+        } else if (wordCount === 3 && lookaheadWords === 1) {
+          // 3 + 1 = 4 words total, wait 1 more word so full 4 words are together
+          shouldBreak = false;
+        } else if (wordCount === 3 && (pauseToNext >= 0.08 || lookaheadWords === 2 || lookaheadWords === 3 || Boolean(w.isSegBoundary))) {
+          shouldBreak = true;
+        }
+      } else if (wordCount >= 5) {
+        shouldBreak = true;
+      }
 
       if (shouldBreak) {
-        const segEnd = Math.max(w.end, currentStart + 0.4);
+        // When vocal is continuous (< 0.25s pause), connect segment end directly to next word start ("tetap terhubung")
+        const segEnd = nextWord && pauseToNext < 0.25 ? nextWord.start : Math.max(w.end, currentStart + 0.35);
         const sentenceText = currentWords.map((cw) => cw.word).join(' ').trim();
 
         reconstructed.push({
@@ -997,8 +1023,23 @@ export class WhisperAIService {
       }
     }
 
-    // STRICT NON-COLLISION POST-PROCESSING:
-    // Ensure every sentence connects seamlessly without overlapping the next
+    if (currentWords.length > 0) {
+      const lastW = allWords[allWords.length - 1];
+      reconstructed.push({
+        id: `${idPrefix}-${reconstructed.length}-${Date.now()}`,
+        start: Number(currentStart.toFixed(2)),
+        end: Number(lastW.end.toFixed(2)),
+        text: currentWords.map((cw) => cw.word).join(' ').trim(),
+        words: currentWords.map((cw) => ({
+          word: cw.word,
+          start: Number(cw.start.toFixed(2)),
+          end: Number(cw.end.toFixed(2)),
+        })),
+      });
+    }
+
+    // STRICT NON-COLLISION & SEAMLESS CONTINUITY POST-PROCESSING:
+    // Ensure every sentence connects seamlessly without overlapping or blank gaps
     for (let i = 0; i < reconstructed.length; i++) {
       const curr = reconstructed[i];
       const next = reconstructed[i + 1];
@@ -1006,13 +1047,184 @@ export class WhisperAIService {
       if (next) {
         if (curr.end > next.start) {
           curr.end = Math.max(curr.start + 0.2, next.start);
-        } else if (next.start - curr.end < 0.15) {
-          // Seamless bridging if gap is negligible
+        } else if (next.start - curr.end < 0.25) {
+          // Seamless handoff between consecutive lines so screen never flickers blank
           curr.end = next.start;
         }
       }
     }
 
     return reconstructed;
+  }
+
+  /**
+   * Intelligently aligns plain text lyrics (with verses, chorus, lines) against audio word timestamps.
+   * Preserves the exact poetic structure of the lyrics while locking each line to the vocal audio.
+   */
+  public static alignLyricsWithPlainText(
+    currentLyrics: LyricSegment[],
+    plainLyricsText: string,
+    idPrefix: string = 'aligned'
+  ): LyricSegment[] {
+    if (!plainLyricsText || !plainLyricsText.trim()) return currentLyrics;
+
+    // 1. Collect all chronological word timestamps from current transcribed lyrics
+    interface AudioWord {
+      word: string;
+      clean: string;
+      start: number;
+      end: number;
+    }
+    const audioWords: AudioWord[] = [];
+
+    for (const seg of currentLyrics) {
+      if (seg.words && seg.words.length > 0) {
+        for (const w of seg.words) {
+          const wt = (w.word || '').trim();
+          if (wt) {
+            audioWords.push({
+              word: wt,
+              clean: wt.toLowerCase().replace(/[^a-z0-9]/g, ''),
+              start: Number(w.start) || seg.start,
+              end: Number(w.end) || seg.end,
+            });
+          }
+        }
+      } else if (seg.text && seg.text.trim()) {
+        const words = seg.text.trim().split(/\s+/).filter(Boolean);
+        const segDur = Math.max(0.1, seg.end - seg.start);
+        const wDur = segDur / Math.max(1, words.length);
+        words.forEach((w, i) => {
+          audioWords.push({
+            word: w,
+            clean: w.toLowerCase().replace(/[^a-z0-9]/g, ''),
+            start: Number((seg.start + i * wDur).toFixed(3)),
+            end: Number((seg.start + (i + 1) * wDur).toFixed(3)),
+          });
+        });
+      }
+    }
+
+    // Fallback if no audio words exist at all
+    if (audioWords.length === 0) {
+      const rawLines = plainLyricsText.split('\n').map((l) => l.trim()).filter(Boolean);
+      return rawLines.map((line, idx) => ({
+        id: `${idPrefix}-${idx}-${Date.now()}`,
+        start: idx * 3.0,
+        end: (idx + 1) * 3.0,
+        text: line,
+      }));
+    }
+
+    audioWords.sort((a, b) => a.start - b.start);
+
+    // 2. Parse text into lines, handling section headers (Verse, Chorus, etc.)
+    const rawLines = plainLyricsText.split('\n').map((l) => l.trim()).filter(Boolean);
+    const alignedSegments: LyricSegment[] = [];
+    let audioWordCursor = 0;
+
+    for (let lineIdx = 0; lineIdx < rawLines.length; lineIdx++) {
+      const line = rawLines[lineIdx];
+      const isSectionTag = /^(\[|\()(verse|chorus|hook|bridge|intro|outro|pre-chorus|drop|reff|solo)[\s\d_-]*(\]|\))$/i.test(line);
+
+      const lineWords = line.split(/\s+/).filter(Boolean);
+      if (lineWords.length === 0) continue;
+
+      if (isSectionTag) {
+        const nextWord = audioWords[audioWordCursor];
+        const tagStart = nextWord ? Math.max(0, nextWord.start - 0.4) : (alignedSegments[alignedSegments.length - 1]?.end ?? 0);
+        const tagEnd = nextWord ? nextWord.start : tagStart + 1.0;
+        alignedSegments.push({
+          id: `${idPrefix}-sec-${lineIdx}-${Date.now()}`,
+          start: Number(tagStart.toFixed(2)),
+          end: Number(tagEnd.toFixed(2)),
+          text: line,
+          words: [{ word: line, start: tagStart, end: tagEnd }],
+        });
+        continue;
+      }
+
+      // Match line words against chronological audio words
+      const matchedAudioWords: AudioWord[] = [];
+      const lineCleanWords = lineWords.map((w) => w.toLowerCase().replace(/[^a-z0-9]/g, '')).filter(Boolean);
+
+      let searchPtr = audioWordCursor;
+      const targetCount = lineCleanWords.length;
+
+      for (let wIdx = 0; wIdx < targetCount; wIdx++) {
+        const targetClean = lineCleanWords[wIdx];
+        if (!targetClean) continue;
+
+        if (searchPtr < audioWords.length) {
+          const cand = audioWords[searchPtr];
+          if (cand.clean === targetClean || cand.clean.includes(targetClean) || targetClean.includes(cand.clean)) {
+            matchedAudioWords.push(cand);
+            searchPtr++;
+            continue;
+          }
+
+          let foundNearby = false;
+          for (let look = 1; look <= 3 && searchPtr + look < audioWords.length; look++) {
+            const lookCand = audioWords[searchPtr + look];
+            if (lookCand.clean === targetClean) {
+              matchedAudioWords.push(lookCand);
+              searchPtr = searchPtr + look + 1;
+              foundNearby = true;
+              break;
+            }
+          }
+          if (foundNearby) continue;
+
+          matchedAudioWords.push(cand);
+          searchPtr++;
+        }
+      }
+
+      audioWordCursor = Math.min(audioWords.length, searchPtr);
+
+      if (matchedAudioWords.length > 0) {
+        const segStart = matchedAudioWords[0].start;
+        const segEnd = Math.max(matchedAudioWords[matchedAudioWords.length - 1].end, segStart + 0.35);
+
+        alignedSegments.push({
+          id: `${idPrefix}-line-${lineIdx}-${Date.now()}`,
+          start: Number(segStart.toFixed(2)),
+          end: Number(segEnd.toFixed(2)),
+          text: line,
+          words: lineWords.map((origWord, wi) => {
+            const cleanOrig = origWord.trim();
+            const matchedW = matchedAudioWords[wi];
+            if (matchedW) {
+              return {
+                word: cleanOrig,
+                start: Number(matchedW.start.toFixed(2)),
+                end: Number(matchedW.end.toFixed(2)),
+              };
+            }
+            const frac = wi / Math.max(1, lineWords.length);
+            const wStart = segStart + frac * (segEnd - segStart);
+            const wEnd = segStart + ((wi + 1) / Math.max(1, lineWords.length)) * (segEnd - segStart);
+            return {
+              word: cleanOrig,
+              start: Number(wStart.toFixed(2)),
+              end: Number(wEnd.toFixed(2)),
+            };
+          }),
+        });
+      }
+    }
+
+    // Non-collision clean up
+    for (let i = 0; i < alignedSegments.length; i++) {
+      const curr = alignedSegments[i];
+      const next = alignedSegments[i + 1];
+      if (next) {
+        if (curr.end > next.start) {
+          curr.end = Math.max(curr.start + 0.2, next.start);
+        }
+      }
+    }
+
+    return alignedSegments.length > 0 ? alignedSegments : currentLyrics;
   }
 }

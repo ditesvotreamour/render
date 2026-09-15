@@ -162,6 +162,45 @@ export class AudioTrimmerJoiner {
   }
 
   /**
+   * Automatically compress and convert any audio Blob (e.g. large 42MB WAV or FLAC)
+   * to studio-grade MP3 (192 kbps or 128 kbps).
+   * Reduces file size by 85-90%, preventing GitHub API Gateway 401 "Bad credentials" payload rejection.
+   */
+  public static async compressBlobAudio(
+    blob: Blob,
+    maxBitrate: 128 | 192 | 320 = 192,
+    onProgress?: (percent: number) => void
+  ): Promise<Blob> {
+    // If already an MP3 and size is reasonable (< 15MB), skip re-encoding
+    if (blob.type.includes('mp3') && blob.size <= 15 * 1024 * 1024) {
+      return blob;
+    }
+
+    const arrayBuf = await blob.arrayBuffer();
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) {
+      return blob;
+    }
+
+    const audioCtx = new AudioContextClass();
+    try {
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuf);
+      let targetBitrate = maxBitrate;
+      // If audio duration is longer than 15 minutes, downscale to 128kbps to keep under ~15MB
+      if (audioBuffer.duration > 900 && targetBitrate > 128) {
+        targetBitrate = 128;
+      }
+      return this.audioBufferToMp3(audioBuffer, targetBitrate, onProgress);
+    } finally {
+      try {
+        await audioCtx.close();
+      } catch {
+        // ignore close error
+      }
+    }
+  }
+
+  /**
    * Extract audio peaks for interactive waveform canvas display
    */
   public static extractWaveformPeaks(buffer: AudioBuffer, numBuckets: number = 800): Float32Array {

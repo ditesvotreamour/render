@@ -15,6 +15,11 @@ import {
   Crosshair,
   Download,
   Sparkles,
+  Scissors,
+  Combine,
+  ArrowRight,
+  ArrowLeft,
+  Target,
 } from 'lucide-react';
 import type { LyricSegment, SubtitleConfig, AudioTrack } from '../types/visualizer';
 import { globalAudioEngine } from '../utils/audioEngine';
@@ -259,7 +264,213 @@ export const SubtitleEditorModal: React.FC<SubtitleEditorModalProps> = ({
     if (lyrics.length === 0) return;
     const reconstructed = WhisperAIService.reconstructSubtitlesBySentence(lyrics);
     updateLyrics(reconstructed);
-    showNotification(`✨ ${reconstructed.length} kalimat berhasil disusun rapi satu baris & anti-tabrakan!`);
+    showNotification(`✨ ${reconstructed.length} baris lirik berhasil disusun menjadi 3-4 kata yang terhubung rapi!`);
+  };
+
+  // Split line at a given word index (or halfway)
+  const handleSplitLine = (index: number, atWordIndex?: number) => {
+    const target = lyrics[index];
+    if (!target) return;
+    const rawWords = target.words && target.words.length > 0
+      ? target.words
+      : target.text.trim().split(/\s+/).filter(Boolean).map((w, wi, arr) => {
+          const dur = Math.max(0.1, target.end - target.start);
+          const wDur = dur / Math.max(1, arr.length);
+          return {
+            word: w,
+            start: Number((target.start + wi * wDur).toFixed(2)),
+            end: Number((target.start + (wi + 1) * wDur).toFixed(2)),
+          };
+        });
+
+    if (rawWords.length <= 1) {
+      showNotification('⚠️ Baris hanya berisi 1 kata, tidak dapat dibagi.');
+      return;
+    }
+
+    const splitAt = atWordIndex !== undefined ? atWordIndex : Math.ceil(rawWords.length / 2);
+    const firstWords = rawWords.slice(0, splitAt);
+    const secondWords = rawWords.slice(splitAt);
+
+    const firstText = firstWords.map((w) => w.word).join(' ').trim();
+    const secondText = secondWords.map((w) => w.word).join(' ').trim();
+
+    const firstStart = target.start;
+    const firstEnd = secondWords[0]?.start ?? Number(((target.start + target.end) / 2).toFixed(2));
+    const secondStart = firstEnd;
+    const secondEnd = target.end;
+
+    const line1: LyricSegment = {
+      id: `${target.id}-pt1-${Date.now()}`,
+      start: firstStart,
+      end: firstEnd,
+      text: firstText,
+      words: firstWords,
+    };
+    const line2: LyricSegment = {
+      id: `split-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      start: secondStart,
+      end: secondEnd,
+      text: secondText,
+      words: secondWords,
+    };
+
+    const updated = [...lyrics.slice(0, index), line1, line2, ...lyrics.slice(index + 1)];
+    updateLyrics(updated);
+    showNotification(`✂️ Baris #${index + 1} berhasil dibagi menjadi 2 baris!`);
+  };
+
+  // Merge line with next line
+  const handleMergeWithNext = (index: number) => {
+    if (index >= lyrics.length - 1) return;
+    const curr = lyrics[index];
+    const next = lyrics[index + 1];
+    if (!curr || !next) return;
+
+    const mergedWords = [
+      ...(curr.words || curr.text.split(/\s+/).filter(Boolean).map((w, i, a) => ({
+        word: w,
+        start: curr.start + (i / Math.max(1, a.length)) * (curr.end - curr.start),
+        end: curr.start + ((i + 1) / Math.max(1, a.length)) * (curr.end - curr.start),
+      }))),
+      ...(next.words || next.text.split(/\s+/).filter(Boolean).map((w, i, a) => ({
+        word: w,
+        start: next.start + (i / Math.max(1, a.length)) * (next.end - next.start),
+        end: next.start + ((i + 1) / Math.max(1, a.length)) * (next.end - next.start),
+      }))),
+    ];
+
+    const mergedLine: LyricSegment = {
+      id: curr.id,
+      start: curr.start,
+      end: Math.max(curr.end, next.end),
+      text: `${curr.text.trim()} ${next.text.trim()}`.trim(),
+      words: mergedWords,
+    };
+
+    const updated = [...lyrics.slice(0, index), mergedLine, ...lyrics.slice(index + 2)];
+    updateLyrics(updated);
+    showNotification(`🔗 Baris #${index + 1} dan #${index + 2} berhasil digabungkan!`);
+  };
+
+  // Move the last word of line to the beginning of next line
+  const handleMoveLastWordToNext = (index: number) => {
+    if (index >= lyrics.length - 1) return;
+    const curr = lyrics[index];
+    const next = lyrics[index + 1];
+    if (!curr || !next) return;
+
+    const currWords = curr.text.trim().split(/\s+/).filter(Boolean);
+    if (currWords.length <= 1) {
+      showNotification('⚠️ Baris ini hanya memiliki 1 kata.');
+      return;
+    }
+
+    const movedWord = currWords.pop()!;
+    const nextWords = [movedWord, ...next.text.trim().split(/\s+/).filter(Boolean)];
+
+    let newCurrEnd = curr.end;
+    if (curr.words && curr.words.length > 1) {
+      newCurrEnd = curr.words[curr.words.length - 2].end;
+    } else {
+      newCurrEnd = Number((curr.start + (curr.end - curr.start) * (currWords.length / (currWords.length + 1))).toFixed(2));
+    }
+
+    const updatedCurr: LyricSegment = {
+      ...curr,
+      text: currWords.join(' '),
+      end: newCurrEnd,
+      words: curr.words && curr.words.length > 1 ? curr.words.slice(0, -1) : undefined,
+    };
+
+    const updatedNext: LyricSegment = {
+      ...next,
+      text: nextWords.join(' '),
+      start: Math.min(newCurrEnd, next.start),
+      words: nextWords.map((w, wi, a) => {
+        const segDur = Math.max(0.1, next.end - Math.min(newCurrEnd, next.start));
+        const wDur = segDur / Math.max(1, a.length);
+        return {
+          word: w,
+          start: Number((Math.min(newCurrEnd, next.start) + wi * wDur).toFixed(2)),
+          end: Number((Math.min(newCurrEnd, next.start) + (wi + 1) * wDur).toFixed(2)),
+        };
+      }),
+    };
+
+    const updated = [...lyrics];
+    updated[index] = updatedCurr;
+    updated[index + 1] = updatedNext;
+    updateLyrics(updated);
+    showNotification(`➡️ Kata "${movedWord}" dipindahkan ke baris #${index + 2}`);
+  };
+
+  // Pull the first word of next line to the end of current line
+  const handlePullFirstWordFromNext = (index: number) => {
+    if (index >= lyrics.length - 1) return;
+    const curr = lyrics[index];
+    const next = lyrics[index + 1];
+    if (!curr || !next) return;
+
+    const nextWords = next.text.trim().split(/\s+/).filter(Boolean);
+    if (nextWords.length <= 1) {
+      showNotification('⚠️ Baris berikutnya hanya memiliki 1 kata.');
+      return;
+    }
+
+    const pulledWord = nextWords.shift()!;
+    const currWords = [...curr.text.trim().split(/\s+/).filter(Boolean), pulledWord];
+
+    let newNextStart = next.start;
+    if (next.words && next.words.length > 1) {
+      newNextStart = next.words[1].start;
+    } else {
+      newNextStart = Number((next.start + (next.end - next.start) * (1 / (nextWords.length + 1))).toFixed(2));
+    }
+
+    const updatedCurr: LyricSegment = {
+      ...curr,
+      text: currWords.join(' '),
+      end: Math.max(curr.end, newNextStart),
+      words: currWords.map((w, wi, a) => {
+        const segDur = Math.max(0.1, Math.max(curr.end, newNextStart) - curr.start);
+        const wDur = segDur / Math.max(1, a.length);
+        return {
+          word: w,
+          start: Number((curr.start + wi * wDur).toFixed(2)),
+          end: Number((curr.start + (wi + 1) * wDur).toFixed(2)),
+        };
+      }),
+    };
+
+    const updatedNext: LyricSegment = {
+      ...next,
+      text: nextWords.join(' '),
+      start: newNextStart,
+      words: next.words && next.words.length > 1 ? next.words.slice(1) : undefined,
+    };
+
+    const updated = [...lyrics];
+    updated[index] = updatedCurr;
+    updated[index + 1] = updatedNext;
+    updateLyrics(updated);
+    showNotification(`⬅️ Kata "${pulledWord}" ditarik ke baris #${index + 1}`);
+  };
+
+  // Align bulk plain text lyrics with audio words
+  const handleSmartAlignBulkText = () => {
+    if (!bulkText.trim()) {
+      showNotification('⚠️ Teks lirik kosong. Silakan paste lirik lagu Anda terlebih dahulu.');
+      return;
+    }
+    if (lyrics.length === 0) {
+      handleApplyBulkText();
+      return;
+    }
+    const aligned = WhisperAIService.alignLyricsWithPlainText(lyrics, bulkText);
+    updateLyrics(aligned);
+    setActiveTab('lines');
+    showNotification(`🎯 Berhasil mencocokkan ${aligned.length} baris lirik sesuai naskah & ketukan audio!`);
   };
 
   const handleSearchReplace = () => {
@@ -498,11 +709,11 @@ export const SubtitleEditorModal: React.FC<SubtitleEditorModalProps> = ({
               onClick={handleReconstructBySentence}
               disabled={lyrics.length === 0}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold text-xs bg-gradient-to-r from-amber-500/20 via-orange-500/20 to-amber-600/20 hover:from-amber-500/30 hover:to-orange-500/30 border border-amber-500/40 text-amber-300 transition-all shadow-sm active:scale-95 disabled:opacity-40"
-              title="Susun subtitle per kalimat utuh (berdasarkan tanda baca) agar tampil 1 baris & menyambung tanpa bertabrakan"
+              title="Susun subtitle menjadi 3-4 kata per baris yang tetap terhubung rapi, ideal untuk video vertikal (Shorts/TikTok/Reels) maupun horisontal agar tidak terpotong"
             >
               <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span className="hidden md:inline">✨ Susun Per Kalimat (Satu Baris)</span>
-              <span className="md:hidden">✨ Per Kalimat</span>
+              <span className="hidden md:inline">✨ Rapikan 3-4 Kata (Vertikal & Horisontal)</span>
+              <span className="md:hidden">✨ 3-4 Kata</span>
             </button>
 
             {/* Tombol Simpan Lirik .SRT */}
@@ -719,7 +930,7 @@ export const SubtitleEditorModal: React.FC<SubtitleEditorModalProps> = ({
                         </div>
                       </div>
 
-                      {/* Line text input */}
+                      {/* Line text input with Quick Split / Merge / Shift Word Actions */}
                       <div className="flex items-center gap-2">
                         <input
                           type="text"
@@ -728,6 +939,47 @@ export const SubtitleEditorModal: React.FC<SubtitleEditorModalProps> = ({
                           placeholder="Teks lirik pada baris ini..."
                           className="flex-1 px-3 py-1.5 rounded-lg bg-black/30 border border-white/10 text-white font-medium text-sm focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all"
                         />
+
+                        {/* Quick Word & Line Utilities */}
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={() => handleSplitLine(idx)}
+                            title="Bagi baris ini menjadi 2 baris terpisah di tengah kalimat"
+                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-white/5 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 border border-white/10 hover:border-cyan-500/30 text-xs transition-all"
+                          >
+                            <Scissors className="w-3.5 h-3.5 text-cyan-400" />
+                            <span className="hidden sm:inline text-[11px]">Bagi</span>
+                          </button>
+
+                          {idx < lyrics.length - 1 && (
+                            <>
+                              <button
+                                onClick={() => handleMergeWithNext(idx)}
+                                title={`Gabungkan baris #${idx + 1} dengan baris #${idx + 2}`}
+                                className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-white/5 hover:bg-indigo-500/20 text-slate-300 hover:text-indigo-300 border border-white/10 hover:border-indigo-500/30 text-xs transition-all"
+                              >
+                                <Combine className="w-3.5 h-3.5 text-indigo-400" />
+                                <span className="hidden sm:inline text-[11px]">Gabung #{idx + 2}</span>
+                              </button>
+
+                              <button
+                                onClick={() => handleMoveLastWordToNext(idx)}
+                                title="Pindahkan kata terakhir baris ini ke awal baris berikutnya"
+                                className="p-1.5 rounded-lg bg-white/5 hover:bg-amber-500/20 text-slate-400 hover:text-amber-300 border border-white/10 hover:border-amber-500/30 transition-all"
+                              >
+                                <ArrowRight className="w-3.5 h-3.5 text-amber-400" />
+                              </button>
+
+                              <button
+                                onClick={() => handlePullFirstWordFromNext(idx)}
+                                title="Tarik kata pertama dari baris berikutnya ke akhir baris ini"
+                                className="p-1.5 rounded-lg bg-white/5 hover:bg-teal-500/20 text-slate-400 hover:text-teal-300 border border-white/10 hover:border-teal-500/30 transition-all"
+                              >
+                                <ArrowLeft className="w-3.5 h-3.5 text-teal-400" />
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </div>
 
                       {/* Optional translation input if segment has translation */}
@@ -787,6 +1039,14 @@ export const SubtitleEditorModal: React.FC<SubtitleEditorModalProps> = ({
                     className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-white text-xs font-semibold transition-all"
                   >
                     Batal
+                  </button>
+                  <button
+                    onClick={handleSmartAlignBulkText}
+                    title="Cocokkan baris-baris lirik tertulis ini (Verse/Chorus) dengan timestamp audio yang ada secara otomatis"
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white text-xs font-bold transition-all shadow-lg shadow-emerald-500/20 active:scale-95"
+                  >
+                    <Target className="w-4 h-4" />
+                    <span>🎯 Cocokkan Teks Lirik ke Audio</span>
                   </button>
                   <button
                     onClick={handleApplyBulkText}

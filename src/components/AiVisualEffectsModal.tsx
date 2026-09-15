@@ -53,7 +53,7 @@ export const AiVisualEffectsModal: React.FC<AiVisualEffectsModalProps> = ({
     if (saved && GROQ_DIRECTOR_MODELS.some((m) => m.id === saved)) {
       return saved;
     }
-    return 'openai/gpt-oss-20b';
+    return 'llama-3.3-70b-versatile';
   });
   const [isLoadingGroq, setIsLoadingGroq] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);

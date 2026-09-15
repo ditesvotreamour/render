@@ -14,7 +14,11 @@ export type VisualizerStyle =
   | 'trap_nation_pulse'
   | 'cyber_tunnel_3d'
   | 'neon_infinity_ribbon'
-  | 'audio_aura_sphere';
+  | 'audio_aura_sphere'
+  | 'neon_pillars'
+  | 'led_spectrum'
+  | 'voice_soundwave'
+  | 'laser_needles';
 
 export type ColorMode = 'solid' | 'gradient_linear' | 'gradient_radial' | 'rainbow' | 'neon_dual';
 
@@ -158,6 +162,10 @@ export interface VisualizerConfig {
   pulseWithBass?: boolean;
   peakDots?: boolean;
   invertDirection?: boolean;
+  positionMode?: 'center' | 'bottom' | 'below_subtitle' | 'above_subtitle' | 'custom';
+  customPosY?: number; // 5 to 95 (%)
+  customPosX?: number; // 5 to 95 (%)
+  spectrumWidth?: number; // 25 to 100 (%) for linear/vertical spectrums
 }
 
 export type LogoShape = 'circle' | 'rounded_rect' | 'hexagon' | 'shield' | 'star';
@@ -272,12 +280,15 @@ export interface BRollConfig {
 export interface BackgroundConfig {
   type: BackgroundType;
   customImageUrl: string;
+  customImageMediaType?: 'image' | 'video';
   multiImageUrls?: string[];
   multiImageSlides?: SlideItem[];
   multiImageInterval?: number; // seconds between images (fallback when slides not explicitly timed)
   multiImageTransition?: 'fade' | 'fade_black' | 'zoom' | 'slide' | 'cut';
   multiImageKenBurns?: boolean;
   videoFrameSequence?: FrameSequenceConfig;
+  customImageVisualEffect?: VisualEffectType;
+  customImageVisualEffectIntensity?: number;
   bRoll?: BRollConfig;
   timelineFxClips?: TimelineFxClip[];
   solidColor: string;

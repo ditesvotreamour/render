@@ -20,6 +20,13 @@ import {
   Box,
   Infinity,
   Sun,
+  MoveVertical,
+  MoveHorizontal,
+  ArrowDown,
+  ArrowUp,
+  AlignCenter,
+  AudioLines,
+  Columns3,
 } from 'lucide-react';
 import type { VisualizerConfig, VisualizerStyle, ColorMode } from '../../types/visualizer';
 
@@ -29,6 +36,12 @@ interface VisualizerTabProps {
 }
 
 const VISUALIZER_STYLES: { id: VisualizerStyle; label: string; icon: React.ReactNode; desc: string }[] = [
+  { id: 'neon_pillars', label: 'Pillar Neon EQ', icon: <Columns3 className="w-4 h-4" />, desc: 'Futuristic glowing vertical pillars with laser caps' },
+  { id: 'led_spectrum', label: 'Digital LED VU', icon: <Grid3X3 className="w-4 h-4" />, desc: 'Segmented DJ mixer LED blocks with peak hold' },
+  { id: 'voice_soundwave', label: 'Voice Soundwave', icon: <AudioLines className="w-4 h-4" />, desc: 'Symmetrical vertical waveform (Podcast / Spotify)' },
+  { id: 'laser_needles', label: 'Laser Needles', icon: <Sliders className="w-4 h-4" />, desc: 'Ultra-thin subtle frequency lines, perfect under lyrics' },
+  { id: 'linear_bars', label: 'Linear Spectrum', icon: <BarChart2 className="w-4 h-4" />, desc: 'Mirrored DJ horizontal frequency bars' },
+  { id: 'monstercat_bars', label: 'Monstercat EQ', icon: <Activity className="w-4 h-4" />, desc: 'Vertical spectrum with falling peak dots' },
   { id: 'radial_bars', label: 'Radial Bars', icon: <CircleDot className="w-4 h-4" />, desc: 'Classic BeatFlow / NCS circular equalizer' },
   { id: 'trap_nation_pulse', label: 'Trap Nation', icon: <Flame className="w-4 h-4" />, desc: 'Bass shockwave rings & high-energy aura pulse' },
   { id: 'cyber_tunnel_3d', label: '3D Cyber Tunnel', icon: <Box className="w-4 h-4" />, desc: 'Perspective 3D wireframe polygon depth tunnel' },
@@ -40,8 +53,6 @@ const VISUALIZER_STYLES: { id: VisualizerStyle; label: string; icon: React.React
   { id: 'liquid_ribbon', label: 'Liquid Ribbon', icon: <Waves className="w-4 h-4" />, desc: 'Silky chromatic undulating fluid waves' },
   { id: 'cyber_matrix', label: 'Cyber Matrix', icon: <Grid3X3 className="w-4 h-4" />, desc: 'Segmented LED equalizer blocks with peak hold' },
   { id: 'hexagon_pulse', label: 'Hexagon Pulse', icon: <Hexagon className="w-4 h-4" />, desc: 'Cyberpunk tech shield spectrum' },
-  { id: 'linear_bars', label: 'Linear Spectrum', icon: <BarChart2 className="w-4 h-4" />, desc: 'Mirrored DJ horizontal frequency bars' },
-  { id: 'monstercat_bars', label: 'Monstercat EQ', icon: <Activity className="w-4 h-4" />, desc: 'Vertical spectrum with falling peak dots' },
   { id: 'oscilloscope', label: 'Oscilloscope', icon: <Sliders className="w-4 h-4" />, desc: 'High-energy laser sine waveform ribbon' },
   { id: 'particle_tunnel', label: 'Warp Tunnel', icon: <Eye className="w-4 h-4" />, desc: '3D hyperspace audio-reactive vortex' },
   { id: 'minimal_halo', label: 'Minimal Halo', icon: <Disc className="w-4 h-4" />, desc: 'Ultra-clean luxury pulsing audio ring' },
@@ -245,6 +256,164 @@ export const VisualizerTab: React.FC<VisualizerTabProps> = ({ config, onChange }
             className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400"
           />
         </div>
+      </div>
+
+      {/* 2.5 Posisi & Tata Letak Spektrum (Bisa Digeser) */}
+      <div className={`space-y-3.5 p-3.5 rounded-2xl bg-white/[0.03] border border-white/10 ${isEnabled ? '' : 'opacity-50 pointer-events-none'}`}>
+        <div className="flex items-center justify-between">
+          <label className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+            <MoveVertical className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Posisi & Tata Letak Spektrum</span>
+          </label>
+          <span className="text-[10px] font-mono text-cyan-400 font-semibold px-2 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/20">
+            {config.positionMode === 'below_subtitle'
+              ? 'Di Bawah Subtitle'
+              : config.positionMode === 'above_subtitle'
+              ? 'Di Atas Subtitle'
+              : config.positionMode === 'bottom'
+              ? 'Bawah Layar'
+              : `Y: ${config.customPosY !== undefined ? config.customPosY : (config.style === 'linear_bars' || config.style === 'monstercat_bars' || config.style === 'neon_pillars' || config.style === 'led_spectrum' || config.style === 'voice_soundwave' || config.style === 'laser_needles' ? 65 : 50)}%`}
+          </span>
+        </div>
+
+        {/* Preset Cepat */}
+        <div>
+          <span className="block text-[10px] font-medium text-slate-400 mb-1.5">Preset Penempatan Cepat:</span>
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              onClick={() => update({ positionMode: 'below_subtitle', customPosY: 86 })}
+              className={`px-2.5 py-2 rounded-xl border text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-all text-left ${
+                config.positionMode === 'below_subtitle' || config.customPosY === 86
+                  ? 'bg-gradient-to-r from-amber-500/20 to-orange-500/20 border-amber-500/50 text-amber-300 shadow-sm'
+                  : 'bg-white/5 border-white/10 text-slate-300 hover:text-white hover:bg-white/10'
+              }`}
+              title="Tempatkan spektrum tepat di bawah subtitle lirik lagu"
+            >
+              <ArrowDown className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span className="truncate">Di Bawah Subtitle</span>
+            </button>
+
+            <button
+              onClick={() => update({ positionMode: 'bottom', customPosY: 90 })}
+              className={`px-2.5 py-2 rounded-xl border text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-all text-left ${
+                config.positionMode === 'bottom' || config.customPosY === 90
+                  ? 'bg-gradient-to-r from-emerald-500/20 to-teal-500/20 border-emerald-500/50 text-emerald-300 shadow-sm'
+                  : 'bg-white/5 border-white/10 text-slate-300 hover:text-white hover:bg-white/10'
+              }`}
+              title="Tempatkan di dekat tepi bawah layar"
+            >
+              <ArrowDown className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span className="truncate">Bawah Layar</span>
+            </button>
+
+            <button
+              onClick={() => update({ positionMode: 'above_subtitle', customPosY: 64 })}
+              className={`px-2.5 py-2 rounded-xl border text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-all text-left ${
+                config.positionMode === 'above_subtitle' || config.customPosY === 64
+                  ? 'bg-gradient-to-r from-purple-500/20 to-pink-500/20 border-purple-500/50 text-purple-300 shadow-sm'
+                  : 'bg-white/5 border-white/10 text-slate-300 hover:text-white hover:bg-white/10'
+              }`}
+              title="Tempatkan di atas subtitle lirik lagu"
+            >
+              <ArrowUp className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+              <span className="truncate">Atas Subtitle</span>
+            </button>
+
+            <button
+              onClick={() => update({ positionMode: 'center', customPosY: 50, customPosX: 50 })}
+              className={`px-2.5 py-2 rounded-xl border text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-all text-left ${
+                config.positionMode === 'center' || (config.customPosY === 50 && config.positionMode !== 'below_subtitle')
+                  ? 'bg-gradient-to-r from-cyan-500/20 to-blue-500/20 border-cyan-500/50 text-cyan-300 shadow-sm'
+                  : 'bg-white/5 border-white/10 text-slate-300 hover:text-white hover:bg-white/10'
+              }`}
+            >
+              <AlignCenter className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <span className="truncate">Tengah Layar</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Posisi Vertikal Slider (Y) */}
+        <div className="pt-1 border-t border-white/5">
+          <div className="flex justify-between text-xs mb-1">
+            <span className="text-slate-300 flex items-center gap-1.5">
+              <MoveVertical className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Geser Posisi Vertikal (Atas ↕ Bawah)</span>
+            </span>
+            <span className="font-mono text-cyan-400 text-[11px] font-bold">
+              {config.customPosY !== undefined ? `${config.customPosY}%` : 'Otomatis'}
+            </span>
+          </div>
+          <input
+            type="range"
+            min="10"
+            max="95"
+            step="1"
+            value={config.customPosY !== undefined ? config.customPosY : (config.style === 'linear_bars' || config.style === 'monstercat_bars' || config.style === 'neon_pillars' || config.style === 'led_spectrum' || config.style === 'voice_soundwave' || config.style === 'laser_needles' ? 65 : 50)}
+            onChange={(e) => update({ positionMode: 'custom', customPosY: parseInt(e.target.value) })}
+            className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+          />
+          <div className="flex justify-between text-[9px] text-slate-500 mt-0.5 font-mono">
+            <span>Atas (10%)</span>
+            <span>Tengah (50%)</span>
+            <span>Bawah Lirik (86%)</span>
+            <span>Dasar (95%)</span>
+          </div>
+        </div>
+
+        {/* Posisi Horizontal Slider (X) */}
+        <div>
+          <div className="flex justify-between text-xs mb-1">
+            <span className="text-slate-300 flex items-center gap-1.5">
+              <MoveHorizontal className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Geser Posisi Horizontal (Kiri ↔ Kanan)</span>
+            </span>
+            <span className="font-mono text-indigo-400 text-[11px] font-bold">
+              {config.customPosX !== undefined ? `${config.customPosX}%` : '50% (Tengah)'}
+            </span>
+          </div>
+          <input
+            type="range"
+            min="10"
+            max="90"
+            step="1"
+            value={config.customPosX !== undefined ? config.customPosX : 50}
+            onChange={(e) => update({ customPosX: parseInt(e.target.value) })}
+            className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-400"
+          />
+        </div>
+
+        {/* Lebar Bentangan Spektrum */}
+        {(config.style === 'linear_bars' ||
+          config.style === 'monstercat_bars' ||
+          config.style === 'neon_pillars' ||
+          config.style === 'led_spectrum' ||
+          config.style === 'voice_soundwave' ||
+          config.style === 'laser_needles') && (
+          <div className="p-2.5 rounded-xl bg-white/[0.02] border border-white/5">
+            <div className="flex justify-between text-xs mb-1">
+              <span className="text-slate-300 flex items-center gap-1.5">
+                <Columns3 className="w-3.5 h-3.5 text-pink-400" />
+                <span>Lebar Bentangan Spektrum</span>
+              </span>
+              <span className="font-mono text-pink-400 text-[11px] font-bold">
+                {config.spectrumWidth !== undefined ? `${config.spectrumWidth}%` : '72% (Standar)'}
+              </span>
+            </div>
+            <input
+              type="range"
+              min="30"
+              max="100"
+              step="2"
+              value={config.spectrumWidth !== undefined ? config.spectrumWidth : 72}
+              onChange={(e) => update({ spectrumWidth: parseInt(e.target.value) })}
+              className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-pink-400"
+            />
+            <p className="text-[10px] text-slate-400 mt-1">
+              Kecilkan bentangan agar spektrum tampak pas dan elegan tepat di bawah kalimat lirik tanpa menghalangi video klip.
+            </p>
+          </div>
+        )}
       </div>
 
       {/* 3. Geometry & Sizing Sliders */}

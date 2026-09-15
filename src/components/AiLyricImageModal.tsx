@@ -7,11 +7,15 @@ import {
   Music,
   Image as ImageIcon,
   Check,
+  CheckCircle2,
   AlertCircle,
   Loader2,
   RefreshCw,
   Repeat,
   Video,
+  Key,
+  ExternalLink,
+  Trash2,
 } from 'lucide-react';
 import type { LyricSegment, SlideItem } from '../types/visualizer';
 import {
@@ -41,8 +45,13 @@ export const AiLyricImageModal: React.FC<AiLyricImageModalProps> = ({
   const [matchResults, setMatchResults] = useState<MatchResult[]>([]);
   const [isLoadingGroq, setIsLoadingGroq] = useState<boolean>(false);
   const [groqError, setGroqError] = useState<string | null>(null);
+  const [successNotice, setSuccessNotice] = useState<string | null>(null);
   const [groqApiKey, setGroqApiKey] = useState<string>(() => {
     return localStorage.getItem('groq_api_key') || '';
+  });
+  const [showKeySettings, setShowKeySettings] = useState<boolean>(() => {
+    const saved = localStorage.getItem('groq_api_key') || '';
+    return !saved || saved.startsWith('sk-');
   });
   const [allowReffReuse, setAllowReffReuse] = useState<boolean>(true);
   const [fillGaps, setFillGaps] = useState<boolean>(true);
@@ -65,23 +74,37 @@ export const AiLyricImageModal: React.FC<AiLyricImageModalProps> = ({
   // Run offline heuristic match
   const handleRunHeuristic = () => {
     setGroqError(null);
+    setSuccessNotice(null);
     const results = heuristicMatchImagesToLyrics(images, lyrics, duration, allowReffReuse, {
       enabled: fillGaps,
       slideIntervalSec: gapInterval,
     });
     setMatchResults(results);
+    setSuccessNotice('⚡ Pencocokan instan (heuristik) diperbarui!');
+    setTimeout(() => setSuccessNotice(null), 3000);
   };
 
   // Run Groq LLM semantic match
   const handleRunGroq = async () => {
     const key = groqApiKey.trim() || localStorage.getItem('groq_api_key') || '';
     if (!key) {
-      setGroqError('Groq API Key belum diisi. Silakan masukkan Groq API Key Anda (diawali dengan gsk_).');
+      setShowKeySettings(true);
+      setGroqError('Groq API Key belum diisi. Silakan masukkan Groq API Key Anda (diawali dengan gsk_...).');
       return;
     }
+
+    if (key.startsWith('sk-') && !key.startsWith('gsk_')) {
+      setShowKeySettings(true);
+      setGroqError(
+        'Kunci diawali "sk-" adalah kunci KoboiLLM untuk Whisper STT. Untuk analisis teks & lirik Llama 3.3, silakan dapatkan Groq API Key gratis di console.groq.com/keys (diawali gsk_...).'
+      );
+      return;
+    }
+
     localStorage.setItem('groq_api_key', key);
     setIsLoadingGroq(true);
     setGroqError(null);
+    setSuccessNotice(null);
 
     try {
       const results = await groqLlmMatchImagesToLyrics(key, images, lyrics, duration, allowReffReuse, {
@@ -89,8 +112,13 @@ export const AiLyricImageModal: React.FC<AiLyricImageModalProps> = ({
         slideIntervalSec: gapInterval,
       });
       setMatchResults(results);
+      const usedModel = results.find((r) => r.aiModel)?.aiModel || 'Groq Llama 3.3';
+      setSuccessNotice(`✨ Analisis AI (${usedModel}) berhasil mencocokkan ${results.length} foto ke lirik!`);
+      setTimeout(() => setSuccessNotice(null), 5000);
     } catch (err: any) {
-      setGroqError(err?.message || 'Gagal menjalankan analisis Groq AI');
+      console.error('Groq matching error in modal:', err);
+      setGroqError(err?.message || 'Gagal menjalankan analisis Groq AI.');
+      setShowKeySettings(true);
     } finally {
       setIsLoadingGroq(false);
     }
@@ -190,6 +218,20 @@ export const AiLyricImageModal: React.FC<AiLyricImageModalProps> = ({
               </div>
             )}
 
+            {/* Key Settings Toggle */}
+            <button
+              onClick={() => setShowKeySettings(!showKeySettings)}
+              className={`px-2.5 py-1.5 rounded-lg border font-semibold flex items-center gap-1.5 transition-all text-xs ${
+                groqApiKey.trim() && !groqApiKey.trim().startsWith('sk-')
+                  ? 'bg-emerald-500/10 hover:bg-emerald-500/20 border-emerald-500/30 text-emerald-300'
+                  : 'bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/30 text-amber-300'
+              }`}
+              title="Pengaturan API Key Groq Llama 3.3"
+            >
+              <Key className="w-3.5 h-3.5" />
+              <span>Key: <strong className="font-mono">{groqApiKey.trim().startsWith('gsk_') ? 'gsk_...✓' : groqApiKey.trim() ? 'Tersimpan' : 'Kosong'}</strong></span>
+            </button>
+
             <button
               onClick={() => setAllowReffReuse(!allowReffReuse)}
               className={`px-3 py-1.5 rounded-lg border font-semibold flex items-center gap-1.5 transition-all active:scale-95 ${
@@ -212,39 +254,99 @@ export const AiLyricImageModal: React.FC<AiLyricImageModalProps> = ({
               <span>Pencocokan Heuristik (Offline)</span>
             </button>
 
+            {matchResults.length > 0 && (
+              <button
+                onClick={() => {
+                  if (window.confirm(`Hapus semua ${matchResults.length} foto dari slideshow?`)) {
+                    setMatchResults([]);
+                    onApplySlides([]);
+                    onClose();
+                  }
+                }}
+                className="px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 font-semibold flex items-center gap-1.5 transition-all text-xs cursor-pointer"
+                title="Hapus semua foto dari daftar slideshow"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                <span>Hapus Semua Foto</span>
+              </button>
+            )}
+
             <button
               onClick={handleRunGroq}
               disabled={isLoadingGroq}
-              className="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-bold flex items-center gap-1.5 shadow-md shadow-cyan-900/30 transition-all disabled:opacity-50"
-              title="Kirim ke Groq AI Llama 3 untuk analisis semantik mendalam"
+              className="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 via-indigo-600 to-purple-600 hover:from-cyan-500 hover:to-purple-500 text-white font-bold flex items-center gap-1.5 shadow-md shadow-cyan-900/30 transition-all disabled:opacity-50 cursor-pointer"
+              title="Kirim ke AI Groq (Llama 3.3 Versatile) untuk analisis semantik mendalam"
             >
               {isLoadingGroq ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
               ) : (
                 <Zap className="w-3.5 h-3.5 text-amber-300" />
               )}
-              <span>{isLoadingGroq ? 'Menganalisis...' : 'Analisis Groq AI (Llama 3)'}</span>
+              <span>{isLoadingGroq ? 'Menganalisis Llama 3.3...' : 'Analisis AI (Groq Llama 3.3)'}</span>
             </button>
           </div>
         </div>
 
-        {/* Optional Groq API Key Input if Error or Missing */}
-        {groqError && (
-          <div className="px-5 py-2.5 bg-rose-950/40 border-b border-rose-500/30 flex items-center gap-3 text-xs text-rose-300">
-            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-            <span className="flex-1">{groqError}</span>
+        {/* Collapsible Groq API Key Input Panel */}
+        {showKeySettings && (
+          <div className="px-5 py-2.5 bg-slate-900/95 border-b border-white/10 flex flex-wrap items-center gap-2.5 text-xs">
+            <div className="flex items-center gap-1.5 text-slate-300 font-semibold shrink-0">
+              <Key className="w-3.5 h-3.5 text-amber-400" />
+              <span>Groq API Key:</span>
+            </div>
             <input
               type="password"
-              placeholder="Masukkan gsk_..."
+              placeholder="Masukkan API Key Groq (diawali gsk_...)"
               value={groqApiKey}
-              onChange={(e) => setGroqApiKey(e.target.value)}
-              className="px-2 py-1 rounded bg-black/40 border border-rose-500/40 text-white font-mono text-[11px] w-48"
+              onChange={(e) => {
+                setGroqApiKey(e.target.value);
+                localStorage.setItem('groq_api_key', e.target.value.trim());
+                if (groqError) setGroqError(null);
+              }}
+              className="px-3 py-1.5 rounded-lg bg-black/60 border border-white/15 text-white font-mono text-xs flex-1 min-w-[240px] focus:outline-none focus:border-cyan-400"
             />
-            <button
-              onClick={handleRunGroq}
-              className="px-2 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white font-bold text-[11px]"
+            <a
+              href="https://console.groq.com/keys"
+              target="_blank"
+              rel="noreferrer"
+              className="text-[11px] text-amber-400 hover:text-amber-300 underline font-medium shrink-0 flex items-center gap-1"
             >
-              Coba Lagi
+              <span>Dapatkan Key Gratis di Groq</span>
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          </div>
+        )}
+
+        {/* Notice if Key starts with sk- (KoboiLLM Whisper key) */}
+        {groqApiKey.trim().startsWith('sk-') && !groqApiKey.trim().startsWith('gsk_') && (
+          <div className="px-5 py-2 bg-amber-950/40 border-b border-amber-500/30 flex items-center gap-2 text-[11px] text-amber-300">
+            <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span>
+              Kunci yang Anda masukkan diawali &quot;sk-&quot; (kunci KoboiLLM khusus Whisper STT audio). Untuk analisis semantik Llama 3.3, silakan buat API Key gratis di <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" className="underline font-bold text-amber-200">console.groq.com/keys</a> (diawali gsk_...).
+            </span>
+          </div>
+        )}
+
+        {/* Success Notice Banner */}
+        {successNotice && (
+          <div className="px-5 py-2.5 bg-emerald-950/50 border-b border-emerald-500/30 flex items-center gap-2 text-xs text-emerald-300 animate-fade-in">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span className="font-semibold">{successNotice}</span>
+          </div>
+        )}
+
+        {/* Error Banner */}
+        {groqError && (
+          <div className="px-5 py-2.5 bg-rose-950/50 border-b border-rose-500/30 flex items-center justify-between gap-3 text-xs text-rose-300 animate-fade-in">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>{groqError}</span>
+            </div>
+            <button
+              onClick={() => setShowKeySettings(true)}
+              className="px-2.5 py-1 rounded bg-rose-600/40 hover:bg-rose-600/60 border border-rose-500/50 text-white font-bold text-[11px] shrink-0"
+            >
+              Masukkan Key
             </button>
           </div>
         )}
@@ -316,6 +418,13 @@ export const AiLyricImageModal: React.FC<AiLyricImageModalProps> = ({
                           >
                             {Math.round(res.confidence)}% Match
                           </span>
+
+                          {res.isAiGroq && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-gradient-to-r from-purple-500/20 via-indigo-500/20 to-cyan-500/20 text-cyan-200 border border-cyan-500/40 flex items-center gap-1 shadow-sm">
+                              <Sparkles className="w-2.5 h-2.5 text-cyan-300" />
+                              <span>AI ({res.aiModel || 'Groq Llama 3.3'})</span>
+                            </span>
+                          )}
 
                           {res.isFilenameTimestamp && (
                             <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-cyan-500/25 text-cyan-300 border border-cyan-500/40 flex items-center gap-1">
@@ -390,6 +499,17 @@ export const AiLyricImageModal: React.FC<AiLyricImageModalProps> = ({
                           </span>
                         </div>
                       </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMatchResults((prev) => prev.filter((_, i) => i !== idx));
+                        }}
+                        className="p-2 rounded-lg bg-white/5 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 border border-white/10 hover:border-rose-500/30 transition-all text-xs cursor-pointer shrink-0"
+                        title="Hapus foto ini dari daftar pencocokan"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   </div>
                 );

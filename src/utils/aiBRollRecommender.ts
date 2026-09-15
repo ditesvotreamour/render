@@ -303,18 +303,20 @@ For each selected moment, specify:
 6. reasoning (1 short Indonesian sentence explaining why this B-roll fits the lyric)
 7. recommendedMode ("cutaway", "pip", "split_screen", or "blend_overlay")
 
-Return ONLY a valid JSON array matching this schema:
-[
-  {
-    "startSec": 10.5,
-    "endSec": 16.0,
-    "matchedLyricText": "...",
-    "searchQuery": "...",
-    "mood": "...",
-    "reasoning": "...",
-    "recommendedMode": "cutaway"
-  }
-]`;
+Return ONLY a valid JSON object matching this schema:
+{
+  "recommendations": [
+    {
+      "startSec": 10.5,
+      "endSec": 16.0,
+      "matchedLyricText": "...",
+      "searchQuery": "...",
+      "mood": "...",
+      "reasoning": "...",
+      "recommendedMode": "cutaway"
+    }
+  ]
+}`;
 
   const cleanKey = apiKey.trim();
   const isKoboi = cleanKey.startsWith('sk-') && !cleanKey.startsWith('gsk_');
@@ -323,8 +325,21 @@ Return ONLY a valid JSON array matching this schema:
     : 'https://api.groq.com/openai/v1/chat/completions';
 
   const modelsToTry = isKoboi
-    ? ['gpt-4o-mini', 'gpt-4o', 'qwen/qwen3.6-27b']
-    : ['openai/gpt-oss-20b', 'openai/gpt-oss-120b', 'qwen/qwen3.6-27b', 'groq/compound-mini'];
+    ? ['gpt-4o-mini', 'gpt-4o']
+    : [
+        'llama-3.3-70b-versatile',
+        'llama-3.3-70b-specdec',
+        'deepseek-r1-distill-llama-70b',
+        'llama-3.1-70b-versatile',
+        'llama3-70b-8192',
+        'llama-3.1-8b-instant',
+        'llama3-8b-8192',
+        'llama-3.2-3b-preview',
+        'llama-3.2-1b-preview',
+        'mixtral-8x7b-32768',
+        'gemma2-9b-it',
+        'qwen-2.5-32b',
+      ];
   let parsed: any = null;
   let lastErr: any = null;
 
@@ -376,7 +391,9 @@ Return ONLY a valid JSON array matching this schema:
     throw lastErr || new Error('Gagal mendapatkan rekomendasi B-Roll dari Groq.');
   }
 
-  const list: any[] = Array.isArray(parsed) ? parsed : parsed.recommendations || parsed.broll || parsed.moments || [];
+  const list: any[] = Array.isArray(parsed)
+    ? parsed
+    : parsed.recommendations || parsed.broll || parsed.moments || parsed.clips || [];
   if (!Array.isArray(list) || list.length === 0) {
     throw new Error('Groq returned empty recommendation list.');
   }

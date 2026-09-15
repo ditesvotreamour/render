@@ -218,7 +218,216 @@ export class GitHubRendererService {
   }
 
   /**
-   * Upload audio file directly to GitHub repository to avoid workflow dispatch 65KB payload limit
+   * Uploads large files (up to 100 MB) directly to GitHub repository using the official Git Data API (Blobs API).
+   * This completely bypasses the 25 MB payload limit of GitHub's Contents API (/contents/{path}).
+   */
+  public static async uploadFileViaGitData(
+    cleanRepo: string,
+    token: string,
+    filePath: string,
+    cleanBase64: string,
+    commitMessage: string
+  ): Promise<string> {
+    const authHeaders = {
+      Authorization: `Bearer ${token.trim()}`,
+      Accept: 'application/vnd.github.v3+json',
+      'Content-Type': 'application/json',
+    };
+
+    // 1. Create Git Blob (supports up to 100 MB!)
+    const blobRes = await fetch(`https://api.github.com/repos/${cleanRepo}/git/blobs`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        content: cleanBase64,
+        encoding: 'base64',
+      }),
+    });
+
+    if (!blobRes.ok) {
+      const err = await blobRes.json().catch(() => ({}));
+      if (blobRes.status === 401) {
+        throw new Error(
+          `GitHub API menolak request (HTTP 401 Bad credentials). Ini terjadi jika token tidak memiliki akses ke ${cleanRepo} ATAU ukuran file melebihi batas request GitHub API Gateway (~25 MB). Harap gunakan audio MP3 yang dikompres.`
+        );
+      }
+      throw new Error(
+        err.message || `Gagal membuat Git Blob (HTTP ${blobRes.status}). Periksa kuota/ukuran file.`
+      );
+    }
+    const blobData = await blobRes.json();
+    const blobSha = blobData.sha;
+
+    // 2. Identify default branch (e.g. 'main' or 'master')
+    let defaultBranch = 'main';
+    try {
+      const repoRes = await fetch(`https://api.github.com/repos/${cleanRepo}`, {
+        headers: authHeaders,
+      });
+      if (repoRes.ok) {
+        const repoData = await repoRes.json();
+        if (repoData.default_branch) {
+          defaultBranch = repoData.default_branch;
+        }
+      }
+    } catch {
+      // fallback to 'main'
+    }
+
+    // 3. Get latest commit SHA on default branch
+    let refRes = await fetch(`https://api.github.com/repos/${cleanRepo}/git/ref/heads/${defaultBranch}`, {
+      headers: authHeaders,
+    });
+    if (!refRes.ok && defaultBranch === 'main') {
+      // Fallback check for 'master' branch
+      const masterRes = await fetch(`https://api.github.com/repos/${cleanRepo}/git/ref/heads/master`, {
+        headers: authHeaders,
+      });
+      if (masterRes.ok) {
+        refRes = masterRes;
+        defaultBranch = 'master';
+      }
+    }
+
+    if (!refRes.ok) {
+      const err = await refRes.json().catch(() => ({}));
+      throw new Error(
+        err.message || `Gagal membaca branch ${defaultBranch} (HTTP ${refRes.status}). Pastikan repository sudah memiliki branch utama.`
+      );
+    }
+    const refData = await refRes.json();
+    const latestCommitSha = refData.object?.sha || refData.sha;
+
+    // 4. Get base tree SHA from latest commit
+    const commitRes = await fetch(`https://api.github.com/repos/${cleanRepo}/git/commits/${latestCommitSha}`, {
+      headers: authHeaders,
+    });
+    if (!commitRes.ok) {
+      const err = await commitRes.json().catch(() => ({}));
+      throw new Error(err.message || `Gagal membaca commit tree (HTTP ${commitRes.status}).`);
+    }
+    const commitData = await commitRes.json();
+    const baseTreeSha = commitData.tree?.sha || commitData.sha;
+
+    // 5. Create new tree containing the uploaded blob
+    const treeRes = await fetch(`https://api.github.com/repos/${cleanRepo}/git/trees`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        base_tree: baseTreeSha,
+        tree: [
+          {
+            path: filePath,
+            mode: '100644',
+            type: 'blob',
+            sha: blobSha,
+          },
+        ],
+      }),
+    });
+    if (!treeRes.ok) {
+      const err = await treeRes.json().catch(() => ({}));
+      throw new Error(err.message || `Gagal membuat Git Tree (HTTP ${treeRes.status}).`);
+    }
+    const treeData = await treeRes.json();
+    const newTreeSha = treeData.sha;
+
+    // 6. Create new commit
+    const newCommitRes = await fetch(`https://api.github.com/repos/${cleanRepo}/git/commits`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        message: commitMessage,
+        tree: newTreeSha,
+        parents: [latestCommitSha],
+      }),
+    });
+    if (!newCommitRes.ok) {
+      const err = await newCommitRes.json().catch(() => ({}));
+      throw new Error(err.message || `Gagal membuat Git Commit (HTTP ${newCommitRes.status}).`);
+    }
+    const newCommitData = await newCommitRes.json();
+    const newCommitSha = newCommitData.sha;
+
+    // 7. Update branch reference (points branch to new commit)
+    const updateRefRes = await fetch(`https://api.github.com/repos/${cleanRepo}/git/refs/heads/${defaultBranch}`, {
+      method: 'PATCH',
+      headers: authHeaders,
+      body: JSON.stringify({
+        sha: newCommitSha,
+        force: false,
+      }),
+    });
+    if (!updateRefRes.ok) {
+      const err = await updateRefRes.json().catch(() => ({}));
+      throw new Error(err.message || `Gagal memperbarui branch ref ${defaultBranch} (HTTP ${updateRefRes.status}).`);
+    }
+
+    return filePath;
+  }
+
+  /**
+   * Upload file to GitHub repository with automatic payload optimization:
+   * Uses fast Contents API for small files (< 4 MB), and seamlessly switches to
+   * official Git Data Blobs API (supports up to 100 MB) for audio, video, or files that exceed 4 MB.
+   */
+  public static async uploadFileToRepo(
+    repo: string,
+    token: string,
+    filePath: string,
+    base64Data: string,
+    commitMessage: string
+  ): Promise<string> {
+    const cleanRepo = repo.trim().replace(/^https:\/\/github\.com\//, '');
+    const cleanBase64 = base64Data.replace(/^data:[^;]+;base64,/, '').trim();
+    const approxBytes = Math.round((cleanBase64.length * 3) / 4);
+
+    // If file is 4MB or larger, skip Contents API and use Git Data Blobs API directly to prevent 422 "too large" errors
+    if (approxBytes >= 4 * 1024 * 1024) {
+      console.log(`📦 File ${filePath} berukuran besar (~${(approxBytes / 1024 / 1024).toFixed(1)} MB). Mengunggah via Git Data Blobs API (hingga 100 MB)...`);
+      return this.uploadFileViaGitData(cleanRepo, token, filePath, cleanBase64, commitMessage);
+    }
+
+    // For smaller files, try fast Contents API first
+    const url = `https://api.github.com/repos/${cleanRepo}/contents/${filePath}`;
+    try {
+      const res = await fetch(url, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token.trim()}`,
+          Accept: 'application/vnd.github.v3+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: commitMessage,
+          content: cleanBase64,
+          branch: 'main',
+        }),
+      });
+
+      if (res.ok) {
+        return filePath;
+      }
+
+      const err = await res.json().catch(() => ({}));
+      const errMsg = (err.message || '').toLowerCase();
+      // If error indicates file is too large or status 422, automatically fallback to Git Data API!
+      if (res.status === 422 || errMsg.includes('too large') || errMsg.includes('processed')) {
+        console.warn(`Contents API menolak file karena melebihi batas 25MB (${err.message}). Beralih otomatis ke Git Data Blobs API (100 MB)...`);
+        return this.uploadFileViaGitData(cleanRepo, token, filePath, cleanBase64, commitMessage);
+      }
+
+      throw new Error(err.message || `Gagal mengunggah ${filePath} (HTTP ${res.status}).`);
+    } catch (e: any) {
+      if ((e.message || '').toLowerCase().includes('too large') || (e.message || '').toLowerCase().includes('processed')) {
+        return this.uploadFileViaGitData(cleanRepo, token, filePath, cleanBase64, commitMessage);
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Upload audio file directly to GitHub repository (supports up to 100 MB via Git Blobs API)
    */
   public static async uploadAudioToRepo(
     repo: string,
@@ -226,37 +435,27 @@ export class GitHubRendererService {
     filename: string,
     base64Data: string
   ): Promise<string> {
-    const cleanRepo = repo.trim().replace(/^https:\/\/github\.com\//, '');
-    const cleanBase64 = base64Data.replace(/^data:audio\/[a-z0-9]+;base64,/, '');
+    let ext = 'mp3';
+    if (base64Data.startsWith('data:audio/wav') || base64Data.startsWith('data:audio/x-wav')) ext = 'wav';
+    else if (base64Data.startsWith('data:audio/flac')) ext = 'flac';
+    else if (base64Data.startsWith('data:audio/ogg')) ext = 'ogg';
+    else if (base64Data.startsWith('data:audio/mp4') || base64Data.startsWith('data:audio/m4a') || base64Data.startsWith('data:audio/x-m4a')) ext = 'm4a';
+    else if (base64Data.startsWith('data:audio/aac')) ext = 'aac';
+    else if (base64Data.startsWith('data:audio/webm')) ext = 'webm';
+
     const safeName = (filename || 'custom_audio')
       .replace(/[^a-zA-Z0-9_-]/g, '_')
       .replace(/_+/g, '_')
       .slice(0, 40);
-    const filePath = `audio-uploads/${safeName}-${Date.now()}.mp3`;
-    const url = `https://api.github.com/repos/${cleanRepo}/contents/${filePath}`;
+    const filePath = `audio-uploads/${safeName}-${Date.now()}.${ext}`;
 
-    const res = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        Authorization: `Bearer ${token.trim()}`,
-        Accept: 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        message: `Upload audio for cloud visualizer render: ${filename}`,
-        content: cleanBase64,
-        branch: 'main',
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(
-        err.message || `Failed to upload audio to repository (HTTP ${res.status}). Check token permissions.`
-      );
-    }
-
-    return filePath;
+    return this.uploadFileToRepo(
+      repo,
+      token,
+      filePath,
+      base64Data,
+      `Upload audio for cloud visualizer render: ${filename}`
+    );
   }
 
   /**
@@ -299,7 +498,8 @@ export class GitHubRendererService {
   }
 
   /**
-   * Upload image or video file directly to GitHub repository (under image-uploads/ or video-uploads/) to bypass 65KB payload limit
+   * Upload image or video file directly to GitHub repository (under image-uploads/ or video-uploads/)
+   * Supports up to 100 MB files via Git Blobs API.
    */
   public static async uploadMediaToRepo(
     repo: string,
@@ -308,10 +508,6 @@ export class GitHubRendererService {
     base64Data: string,
     forcedExt?: string
   ): Promise<string> {
-    const cleanRepo = repo.trim().replace(/^https:\/\/github\.com\//, '');
-    // Strip data URI header for any MIME type safely: data:video/mp4;base64, data:image/png;base64, etc.
-    const cleanBase64 = base64Data.replace(/^data:[^;]+;base64,/, '').trim();
-
     let ext = forcedExt || 'png';
     let isVideo = false;
 
@@ -356,30 +552,14 @@ export class GitHubRendererService {
       .replace(/_+/g, '_')
       .slice(0, 30);
     const filePath = `${folder}/${safePrefix}-${Date.now()}.${ext}`;
-    const url = `https://api.github.com/repos/${cleanRepo}/contents/${filePath}`;
 
-    const res = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        Authorization: `Bearer ${token.trim()}`,
-        Accept: 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        message: `Upload ${safePrefix} asset for cloud visualizer render`,
-        content: cleanBase64,
-        branch: 'main',
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(
-        err.message || `Failed to upload ${isVideo ? 'video' : 'image'} to repository (HTTP ${res.status}). Check token permissions.`
-      );
-    }
-
-    return filePath;
+    return this.uploadFileToRepo(
+      repo,
+      token,
+      filePath,
+      base64Data,
+      `Upload ${safePrefix} asset for cloud visualizer render`
+    );
   }
 
   public static async uploadImageToRepo(

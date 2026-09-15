@@ -139,20 +139,20 @@ export const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
     const { width: internalWidth, height: internalHeight } = getPreviewDimensions(aspectRatio, currentResolution);
     const { baseW: baseWidth, baseH: baseHeight } = getBaseDimensions(aspectRatio);
 
-    let containerClass = 'aspect-video w-full max-w-5xl max-h-[60vh] sm:max-h-[80vh]';
+    let containerClass = 'aspect-video w-full max-w-5xl max-h-full';
     switch (aspectRatio) {
       case '9:16':
-        containerClass = 'aspect-[9/16] w-auto h-full max-h-[68vh] sm:max-h-[82vh] max-w-[90vw] sm:max-w-[46vh]';
+        containerClass = 'aspect-[9/16] w-auto h-full max-h-full max-w-full';
         break;
       case '1:1':
-        containerClass = 'aspect-square w-auto h-full max-h-[65vh] sm:max-h-[80vh] max-w-[90vw] sm:max-w-[80vh]';
+        containerClass = 'aspect-square w-auto h-full max-h-full max-w-full';
         break;
       case '4:5':
-        containerClass = 'aspect-[4/5] w-auto h-full max-h-[66vh] sm:max-h-[82vh] max-w-[90vw] sm:max-w-[65vh]';
+        containerClass = 'aspect-[4/5] w-auto h-full max-h-full max-w-full';
         break;
       case '16:9':
       default:
-        containerClass = 'aspect-video w-full max-w-5xl max-h-[60vh] sm:max-h-[80vh]';
+        containerClass = 'aspect-video w-full max-w-5xl max-h-full';
         break;
     }
 

@@ -360,10 +360,10 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
           <button
             onClick={handleReconstructSentence}
             className="w-full py-2.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 hover:text-white text-xs font-black flex items-center justify-center gap-2 transition-all transform active:scale-95 shadow-md shadow-cyan-500/10"
-            title="Gabungkan kata-kata menjadi kalimat utuh per tanda baca (. ? ! ,) dan cegah tabrakan waktu antar kalimat"
+            title="Susun kata-kata lirik menjadi 3-4 kata per baris yang tetap terhubung rapi, pas untuk format vertikal (9:16 Shorts/Reels/TikTok) maupun horisontal"
           >
             <Sparkles className="w-4 h-4 text-cyan-400" />
-            <span>✨ Rapikan Subtitle Per Kalimat (Satu Baris & Anti-Tabrakan)</span>
+            <span>✨ Rapikan 3-4 Kata per Baris (Vertikal & Horisontal)</span>
           </button>
         )}
 
@@ -1073,8 +1073,8 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
               <div>
                 <div className="flex justify-between text-xs mb-1.5">
                   <div>
-                    <span className="text-slate-300 font-medium text-[11px] block">Kata per Baris / Chunk Kinetik</span>
-                    <span className="text-[10px] text-slate-500">2-4 kata untuk efek Hormozi Reels yang lincah</span>
+                    <span className="text-slate-300 font-medium text-[11px] block">Kata per Baris / Chunk</span>
+                    <span className="text-[10px] text-slate-500">3-4 kata ideal untuk video Vertikal 9:16 (Shorts/TikTok/Reels)</span>
                   </div>
                   <span className="font-mono text-amber-400 text-xs font-bold">
                     {config.maxWordsPerLine ?? 4} kata
@@ -1101,7 +1101,7 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
                     ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300 shadow-sm'
                     : 'bg-white/5 border-white/10 text-slate-400'
                 }`}
-                title="Tampilkan subtitle 1 baris per kalimat utuh tanpa terputus, dan otomatis mengecil pas layar jika kalimat panjang"
+                title="Tampilkan subtitle 1 baris per baris lirik. Pada mode vertikal, otomatis menyesuaikan 3-4 kata agar tidak terpotong"
               >
                 <div className="flex items-center gap-1.5 truncate">
                   <span className="shrink-0">📏</span>

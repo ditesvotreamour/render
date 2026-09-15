@@ -12,6 +12,8 @@ import {
   Film,
   Wand2,
   Trash2,
+  AlertTriangle,
+  X,
 } from 'lucide-react';
 import type { BackgroundConfig, ParticlesConfig, BackgroundType, ParticleType, LyricSegment, SlideItem, VisualEffectType } from '../../types/visualizer';
 import { VISUAL_EFFECT_OPTIONS } from '../../types/visualizer';
@@ -76,6 +78,94 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
   const [storedImages, setStoredImages] = useState<Array<{ url: string; name: string; mediaType?: 'image' | 'video' }>>([]);
   const [isExtractingZip, setIsExtractingZip] = useState<boolean>(false);
   const [zipProgress, setZipProgress] = useState<{ percent: number; message: string }>({ percent: 0, message: '' });
+  const [isClearMediaModalOpen, setIsClearMediaModalOpen] = useState<boolean>(false);
+  const [clearOption, setClearOption] = useState<'all' | 'slideshow' | 'custom'>('all');
+  const [includeBRollInClear, setIncludeBRollInClear] = useState<boolean>(false);
+  const [confirmDeleteSlideshow, setConfirmDeleteSlideshow] = useState<boolean>(false);
+
+  const slideshowCount = bgConfig.multiImageUrls?.length || bgConfig.multiImageSlides?.length || 0;
+  const hasCustomMedia = Boolean(bgConfig.customImageUrl);
+  const bRollCount = bgConfig.bRoll?.clips?.length || 0;
+  const hasAnyBackgroundMedia = slideshowCount > 0 || hasCustomMedia || bRollCount > 0;
+
+  const handleClearCustomMedia = () => {
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    updateBg({
+      customImageUrl: '',
+      customImageMediaType: undefined,
+      customImageVisualEffect: 'none',
+      type: bgConfig.type === 'custom_image' ? 'preset_nebula' : bgConfig.type,
+    });
+  };
+
+  const handleClearSlideshowMedia = () => {
+    if (multiFileInputRef.current) multiFileInputRef.current.value = '';
+    if (zipFileInputRef.current) zipFileInputRef.current.value = '';
+    setStoredImages([]);
+    updateBg({
+      multiImageUrls: [],
+      multiImageSlides: [],
+      type: bgConfig.type === 'multi_image' ? 'preset_nebula' : bgConfig.type,
+    });
+  };
+
+  const handleRemoveSingleSlideMedia = (index: number) => {
+    const targetUrl = bgConfig.multiImageUrls?.[index];
+    const newUrls = (bgConfig.multiImageUrls || []).filter((_, i) => i !== index);
+    const newSlides = (bgConfig.multiImageSlides || []).filter((s, i) => {
+      if (targetUrl) return s.url !== targetUrl;
+      return i !== index;
+    });
+    setStoredImages((prev) =>
+      prev.filter((item, i) => {
+        if (targetUrl) return item.url !== targetUrl;
+        return i !== index;
+      })
+    );
+    updateBg({
+      multiImageUrls: newUrls,
+      multiImageSlides: newSlides,
+      type: newUrls.length === 0 && bgConfig.type === 'multi_image' ? 'preset_nebula' : bgConfig.type,
+    });
+  };
+
+  const handleExecuteClearMedia = (target: 'all' | 'slideshow' | 'custom', clearBRoll: boolean) => {
+    if (target === 'custom') {
+      handleClearCustomMedia();
+      setIsClearMediaModalOpen(false);
+      return;
+    }
+    if (target === 'slideshow') {
+      handleClearSlideshowMedia();
+      setIsClearMediaModalOpen(false);
+      return;
+    }
+    // 'all'
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    if (multiFileInputRef.current) multiFileInputRef.current.value = '';
+    if (zipFileInputRef.current) zipFileInputRef.current.value = '';
+    setStoredImages([]);
+
+    const partial: Partial<BackgroundConfig> = {
+      customImageUrl: '',
+      customImageMediaType: undefined,
+      customImageVisualEffect: 'none',
+      multiImageUrls: [],
+      multiImageSlides: [],
+      videoFrameSequence: undefined,
+      type: 'preset_nebula',
+    };
+
+    if (clearBRoll && bgConfig.bRoll) {
+      partial.bRoll = {
+        ...bgConfig.bRoll,
+        clips: [],
+      };
+    }
+
+    updateBg(partial);
+    setIsClearMediaModalOpen(false);
+  };
 
   const updateBg = (partial: Partial<BackgroundConfig>) => {
     onBgChange({ ...bgConfig, ...partial });
@@ -120,7 +210,7 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
       const url = URL.createObjectURL(file);
       const mediaType = isVideoFile(file) ? 'video' : 'image';
       registerMediaUrl(url, mediaType);
-      updateBg({ customImageUrl: url, type: 'custom_image' });
+      updateBg({ customImageUrl: url, customImageMediaType: mediaType, type: 'custom_image' });
     }
   };
 
@@ -212,6 +302,44 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Menu Pembersihan / Hapus Media Background */}
+      {hasAnyBackgroundMedia && (
+        <div className="p-3.5 rounded-2xl bg-gradient-to-r from-rose-950/40 via-slate-900/90 to-red-950/30 border border-rose-500/35 flex items-center justify-between gap-3 shadow-lg shadow-rose-950/20">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400 shrink-0">
+              <Trash2 className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <span className="text-xs font-bold text-white block truncate">
+                Media Background Aktif
+              </span>
+              <span className="text-[10px] text-rose-300 font-mono block truncate">
+                {[
+                  slideshowCount > 0 ? `${slideshowCount} media slideshow` : null,
+                  hasCustomMedia ? '1 media kustom' : null,
+                  bRollCount > 0 ? `${bRollCount} klip B-roll` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' • ')}
+              </span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              setClearOption('all');
+              setIsClearMediaModalOpen(true);
+            }}
+            className="px-3 py-1.5 rounded-xl bg-rose-600/25 hover:bg-rose-600/40 border border-rose-500/50 text-xs font-bold text-rose-200 hover:text-white flex items-center gap-1.5 transition-all shadow-sm active:scale-95 shrink-0 cursor-pointer"
+            title="Buka menu untuk menghapus semua media di background"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+            <span>Hapus Semua Media</span>
+          </button>
+        </div>
+      )}
+
       {/* 1. Background Theme Selection */}
       <div className="space-y-3">
         <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
@@ -275,10 +403,21 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
               </button>
             </div>
             {bgConfig.customImageUrl && (
-              <p className="text-[10px] text-emerald-400 text-center flex items-center justify-center gap-1">
-                {isVideoMedia(bgConfig.customImageUrl) ? <Video className="w-3 h-3 text-cyan-400" /> : null}
-                <span>✓ Custom {isVideoMedia(bgConfig.customImageUrl) ? 'video' : 'image'} loaded</span>
-              </p>
+              <div className="flex items-center justify-between p-2 rounded-lg bg-black/40 border border-white/10">
+                <p className="text-[10px] text-emerald-400 flex items-center gap-1.5 truncate">
+                  {isVideoMedia(bgConfig.customImageUrl) ? <Video className="w-3 h-3 text-cyan-400 shrink-0" /> : null}
+                  <span className="truncate">✓ Custom {isVideoMedia(bgConfig.customImageUrl) ? 'video' : 'image'} aktif</span>
+                </p>
+                <button
+                  type="button"
+                  onClick={handleClearCustomMedia}
+                  className="px-2 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-[10px] font-semibold text-rose-300 hover:text-rose-200 flex items-center gap-1 transition-all shrink-0 cursor-pointer"
+                  title="Hapus media kustom ini"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>Hapus Media</span>
+                </button>
+              </div>
             )}
           </div>
         )}
@@ -350,6 +489,36 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
               </div>
             )}
             
+            {(bgConfig.multiImageUrls || []).length > 0 && (
+              <div className="flex items-center justify-between pt-1 px-0.5 text-xs">
+                <span className="text-[11px] font-bold text-slate-300 flex items-center gap-1.5">
+                  <Image className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Koleksi Media ({bgConfig.multiImageUrls!.length} item)</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (confirmDeleteSlideshow) {
+                      handleClearSlideshowMedia();
+                      setConfirmDeleteSlideshow(false);
+                    } else {
+                      setConfirmDeleteSlideshow(true);
+                      setTimeout(() => setConfirmDeleteSlideshow(false), 4000);
+                    }
+                  }}
+                  className={`px-2 py-1 rounded-lg border text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer ${
+                    confirmDeleteSlideshow
+                      ? 'bg-rose-600 text-white border-rose-400 animate-pulse'
+                      : 'bg-rose-500/15 hover:bg-rose-500/25 border-rose-500/30 text-rose-300'
+                  }`}
+                  title="Hapus semua foto dan video dari slideshow ini"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>{confirmDeleteSlideshow ? 'Yakin Hapus Semua? Klik Lagi' : 'Hapus Semua Media'}</span>
+                </button>
+              </div>
+            )}
+
             <div className="flex flex-wrap gap-2">
               {(bgConfig.multiImageUrls || []).map((url, i) => {
                 const isVid = isVideoMedia(url);
@@ -371,14 +540,11 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
                       </div>
                     )}
                     <button 
-                      onClick={() => {
-                        const newUrls = [...(bgConfig.multiImageUrls || [])];
-                        newUrls.splice(i, 1);
-                        updateBg({ multiImageUrls: newUrls });
-                      }}
-                      className="absolute inset-0 bg-red-500/80 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-[10px]"
+                      onClick={() => handleRemoveSingleSlideMedia(i)}
+                      className="absolute inset-0 bg-rose-600/90 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-xs font-bold"
+                      title="Hapus media ini"
                     >
-                      X
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 );
@@ -643,21 +809,29 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
         <div className="flex items-center gap-2">
           <button
             onClick={() => setIsAiEffectModalOpen(true)}
-            disabled={!bgConfig.multiImageSlides || bgConfig.multiImageSlides.length === 0}
+            disabled={
+              (!bgConfig.multiImageSlides || bgConfig.multiImageSlides.length === 0) &&
+              !(bgConfig.type === 'custom_image' && bgConfig.customImageUrl)
+            }
             className="flex-1 py-1.5 px-2.5 rounded-xl bg-gradient-to-r from-amber-500/25 via-orange-500/25 to-amber-600/20 hover:from-amber-500/35 hover:to-orange-500/35 border border-amber-500/40 text-xs font-bold text-amber-200 flex items-center justify-center gap-1.5 transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none shadow-sm"
             title="Buka AI Director untuk merekomendasikan dan memasang efek otomatis ke frame"
           >
             <Sparkles className="w-3.5 h-3.5 text-amber-300" />
             <span>✨ Rekomendasi Efek AI</span>
           </button>
-          {bgConfig.multiImageSlides && bgConfig.multiImageSlides.some((s) => s.visualEffect && s.visualEffect !== 'none') && (
+          {((bgConfig.type === 'custom_image' && bgConfig.customImageVisualEffect && bgConfig.customImageVisualEffect !== 'none') ||
+            (bgConfig.multiImageSlides && bgConfig.multiImageSlides.some((s) => s.visualEffect && s.visualEffect !== 'none'))) && (
             <button
               onClick={() => {
-                const cleared = (bgConfig.multiImageSlides || []).map((s) => ({
-                  ...s,
-                  visualEffect: 'none' as VisualEffectType,
-                }));
-                updateBg({ multiImageSlides: cleared });
+                if (bgConfig.type === 'custom_image') {
+                  updateBg({ customImageVisualEffect: 'none' });
+                } else {
+                  const cleared = (bgConfig.multiImageSlides || []).map((s) => ({
+                    ...s,
+                    visualEffect: 'none' as VisualEffectType,
+                  }));
+                  updateBg({ multiImageSlides: cleared });
+                }
               }}
               className="p-1.5 rounded-xl bg-white/5 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 border border-white/10 transition-all text-xs"
               title="Reset semua efek frame ke normal"
@@ -667,8 +841,53 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
           )}
         </div>
 
-        {/* Multi-Image Slides List with Effect Selectors */}
-        {bgConfig.type === 'multi_image' && bgConfig.multiImageSlides && bgConfig.multiImageSlides.length > 0 ? (
+        {/* Visual Effect Selector for Custom Media (Video/Image) OR Multi-Image Slides */}
+        {bgConfig.type === 'custom_image' && bgConfig.customImageUrl ? (
+          <div className="p-2.5 rounded-xl bg-black/40 border border-white/10 flex items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 min-w-0 truncate">
+              {isVideoMedia(bgConfig.customImageUrl) ? (
+                <div className="w-8 h-8 rounded-lg bg-cyan-500/20 border border-cyan-500/40 flex items-center justify-center shrink-0">
+                  <Video className="w-4 h-4 text-cyan-300" />
+                </div>
+              ) : (
+                <img
+                  src={bgConfig.customImageUrl}
+                  alt=""
+                  className="w-8 h-8 rounded-lg object-cover border border-white/15 shrink-0 bg-black"
+                />
+              )}
+              <div className="truncate">
+                <span className="font-bold text-white block truncate text-[11px]">
+                  {isVideoMedia(bgConfig.customImageUrl) ? 'Background Video' : 'Background Image'}
+                </span>
+                <span className="text-[9px] font-mono text-slate-400">
+                  Efek Visual Aktif
+                </span>
+              </div>
+            </div>
+
+            <select
+              value={bgConfig.customImageVisualEffect || 'none'}
+              onChange={(e) => {
+                updateBg({
+                  customImageVisualEffect: e.target.value as VisualEffectType,
+                  customImageVisualEffectIntensity: 0.8,
+                });
+              }}
+              className={`text-[10px] font-bold px-2 py-1 rounded-lg border outline-none cursor-pointer shrink-0 transition-all ${
+                bgConfig.customImageVisualEffect && bgConfig.customImageVisualEffect !== 'none'
+                  ? VISUAL_EFFECT_OPTIONS.find((o) => o.id === bgConfig.customImageVisualEffect)?.badgeClass || 'bg-amber-500/25 text-amber-300 border-amber-500/40'
+                  : 'bg-black/60 text-slate-400 border-white/10 hover:text-white'
+              }`}
+            >
+              {VISUAL_EFFECT_OPTIONS.map((opt) => (
+                <option key={opt.id} value={opt.id} className="bg-slate-900 text-white">
+                  {opt.icon} {opt.shortLabel}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : bgConfig.type === 'multi_image' && bgConfig.multiImageSlides && bgConfig.multiImageSlides.length > 0 ? (
           <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
             {bgConfig.multiImageSlides.map((slide, idx) => (
               <div
@@ -721,7 +940,7 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
             <p className="text-[11px] text-slate-400">
               {bgConfig.type === 'multi_image'
                 ? 'Klik "+ Foto" di Timeline untuk membuat slide, lalu pilih efek visual untuk tiap slide.'
-                : 'Efek kamera frame juga dapat dipasang langsung pada Timeline di posisi jarum playhead.'}
+                : 'Pilih foto atau video latar belakang untuk memasang efek kamera visual.'}
             </p>
           </div>
         )}
@@ -853,20 +1072,239 @@ export const BackgroundTab: React.FC<BackgroundTabProps> = ({
       <AiVisualEffectsModal
         isOpen={isAiEffectModalOpen}
         onClose={() => setIsAiEffectModalOpen(false)}
-        slides={bgConfig.multiImageSlides || []}
+        slides={
+          bgConfig.type === 'custom_image' && bgConfig.customImageUrl
+            ? [
+                {
+                  id: 'bg-custom',
+                  url: bgConfig.customImageUrl,
+                  name: isVideoMedia(bgConfig.customImageUrl) ? 'Background Video' : 'Background Image',
+                  startSec: 0,
+                  endSec: duration || 180,
+                  mediaType: isVideoMedia(bgConfig.customImageUrl) ? 'video' : 'image',
+                  visualEffect: bgConfig.customImageVisualEffect || 'none',
+                  visualEffectIntensity: bgConfig.customImageVisualEffectIntensity,
+                },
+              ]
+            : bgConfig.multiImageSlides || []
+        }
         lyrics={lyrics || []}
         duration={duration || 0}
         onApplyEffects={(updatedSlides) => {
-          updateBg({ multiImageSlides: updatedSlides });
+          if (bgConfig.type === 'custom_image') {
+            const firstActive = updatedSlides.find((s) => s.visualEffect && s.visualEffect !== 'none');
+            updateBg({
+              customImageVisualEffect: firstActive ? firstActive.visualEffect : 'none',
+              customImageVisualEffectIntensity: firstActive ? firstActive.visualEffectIntensity : 0.8,
+            });
+          } else {
+            updateBg({ multiImageSlides: updatedSlides });
+          }
         }}
         onClearAllEffects={() => {
-          const cleared = (bgConfig.multiImageSlides || []).map((s) => ({
-            ...s,
-            visualEffect: 'none' as VisualEffectType,
-          }));
-          updateBg({ multiImageSlides: cleared });
+          if (bgConfig.type === 'custom_image') {
+            updateBg({ customImageVisualEffect: 'none' });
+          } else {
+            const cleared = (bgConfig.multiImageSlides || []).map((s) => ({
+              ...s,
+              visualEffect: 'none' as VisualEffectType,
+            }));
+            updateBg({ multiImageSlides: cleared });
+          }
         }}
       />
+
+      {/* Modal Dialog: Hapus Media di Background */}
+      {isClearMediaModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#0d121f] border border-rose-500/40 rounded-2xl max-w-md w-full shadow-2xl p-5 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400 shrink-0">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Hapus Media di Background
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Pilih media background yang ingin dibersihkan atau dikosongkan.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsClearMediaModalOpen(false)}
+                className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white transition-all text-xs cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Media Stats Card */}
+            <div className="p-3 rounded-xl bg-black/40 border border-white/10 space-y-2 text-xs">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                Media Terdeteksi Saat Ini:
+              </span>
+              <div className="flex flex-col gap-1.5 text-[11px] text-slate-300">
+                {slideshowCount > 0 && (
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-1.5">
+                      <Image className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Slideshow Multi-Media:</span>
+                    </span>
+                    <span className="font-mono text-cyan-300 font-bold">{slideshowCount} item</span>
+                  </div>
+                )}
+                {hasCustomMedia && (
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-1.5">
+                      <Video className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Media Kustom:</span>
+                    </span>
+                    <span className="font-mono text-emerald-300 font-bold">1 file wallpaper/video</span>
+                  </div>
+                )}
+                {bRollCount > 0 && (
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-1.5">
+                      <Film className="w-3.5 h-3.5 text-violet-400" />
+                      <span>Klip B-Roll:</span>
+                    </span>
+                    <span className="font-mono text-violet-300 font-bold">{bRollCount} klip timeline</span>
+                  </div>
+                )}
+                {slideshowCount === 0 && !hasCustomMedia && bRollCount === 0 && (
+                  <p className="text-slate-400 text-[11px] py-1">Tidak ada media kustom yang aktif.</p>
+                )}
+              </div>
+            </div>
+
+            {/* Options Selector */}
+            <div className="space-y-2 text-xs">
+              <label className="text-[11px] font-semibold text-slate-300 block">
+                Pilih Aksi Pembersihan:
+              </label>
+
+              <div className="grid grid-cols-1 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setClearOption('all')}
+                  className={`p-2.5 rounded-xl border text-left flex items-start gap-2.5 transition-all cursor-pointer ${
+                    clearOption === 'all'
+                      ? 'bg-rose-500/15 border-rose-500/50 text-white shadow-sm ring-1 ring-rose-500/30'
+                      : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
+                  }`}
+                >
+                  <div
+                    className={`w-4 h-4 rounded-full border mt-0.5 flex items-center justify-center shrink-0 ${
+                      clearOption === 'all' ? 'border-rose-400 bg-rose-400/20' : 'border-slate-600'
+                    }`}
+                  >
+                    {clearOption === 'all' && <div className="w-2 h-2 rounded-full bg-rose-400" />}
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold block">
+                      Hapus Semua Media & Reset ke Nebula (Direkomendasikan)
+                    </span>
+                    <span className="text-[10px] text-slate-400 mt-0.5 block leading-relaxed">
+                      Membersihkan seluruh foto slideshow dan media kustom, serta mengembalikan visualizer ke background Nebula yang bersih.
+                    </span>
+                  </div>
+                </button>
+
+                {slideshowCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setClearOption('slideshow')}
+                    className={`p-2.5 rounded-xl border text-left flex items-start gap-2.5 transition-all cursor-pointer ${
+                      clearOption === 'slideshow'
+                        ? 'bg-rose-500/15 border-rose-500/50 text-white shadow-sm ring-1 ring-rose-500/30'
+                        : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <div
+                      className={`w-4 h-4 rounded-full border mt-0.5 flex items-center justify-center shrink-0 ${
+                        clearOption === 'slideshow' ? 'border-rose-400 bg-rose-400/20' : 'border-slate-600'
+                      }`}
+                    >
+                      {clearOption === 'slideshow' && <div className="w-2 h-2 rounded-full bg-rose-400" />}
+                    </div>
+                    <div>
+                      <span className="text-xs font-bold block">
+                        Hapus Media Slideshow Saja ({slideshowCount} Item)
+                      </span>
+                      <span className="text-[10px] text-slate-400 mt-0.5 block">
+                        Hanya mengosongkan slide foto dan video tanpa mengubah media kustom.
+                      </span>
+                    </div>
+                  </button>
+                )}
+
+                {hasCustomMedia && (
+                  <button
+                    type="button"
+                    onClick={() => setClearOption('custom')}
+                    className={`p-2.5 rounded-xl border text-left flex items-start gap-2.5 transition-all cursor-pointer ${
+                      clearOption === 'custom'
+                        ? 'bg-rose-500/15 border-rose-500/50 text-white shadow-sm ring-1 ring-rose-500/30'
+                        : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <div
+                      className={`w-4 h-4 rounded-full border mt-0.5 flex items-center justify-center shrink-0 ${
+                        clearOption === 'custom' ? 'border-rose-400 bg-rose-400/20' : 'border-slate-600'
+                      }`}
+                    >
+                      {clearOption === 'custom' && <div className="w-2 h-2 rounded-full bg-rose-400" />}
+                    </div>
+                    <div>
+                      <span className="text-xs font-bold block">
+                        Hapus Media Kustom Saja (1 File)
+                      </span>
+                      <span className="text-[10px] text-slate-400 mt-0.5 block">
+                        Hanya menghapus wallpaper/video kustom.
+                      </span>
+                    </div>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Checkbox B-Roll */}
+            {bRollCount > 0 && (
+              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer pt-1 bg-white/[0.02] p-2 rounded-lg border border-white/5">
+                <input
+                  type="checkbox"
+                  checked={includeBRollInClear}
+                  onChange={(e) => setIncludeBRollInClear(e.target.checked)}
+                  className="rounded border-white/20 text-rose-500 focus:ring-rose-500 bg-black/60 cursor-pointer"
+                />
+                <span>Sertakan juga menghapus {bRollCount} klip B-Roll di timeline</span>
+              </label>
+            )}
+
+            {/* Actions Footer */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => setIsClearMediaModalOpen(false)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => handleExecuteClearMedia(clearOption, includeBRollInClear)}
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-rose-950/40 transition-all active:scale-95 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Konfirmasi Hapus Media</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -40,6 +40,8 @@ import {
   EyeOff,
   Zap,
   Wand2,
+  Minimize2,
+  Maximize2,
 } from 'lucide-react';
 import type {
   AudioTrack,
@@ -48,6 +50,7 @@ import type {
   CenterLogoConfig,
   SlideItem,
   BRollClip,
+  BRollConfig,
   BRollDisplayMode,
   VisualEffectType,
   TimelineFxClip,
@@ -163,6 +166,30 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
     };
   });
   const [showTrackVisibilityMenu, setShowTrackVisibilityMenu] = useState<boolean>(false);
+
+  // Mode Ukuran Baris Ramping vs Normal (Compact Timeline Mode)
+  const [isCompactHeight, setIsCompactHeight] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('capcut_timeline_compact_mode');
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch {
+      return true;
+    }
+  });
+
+  // Custom Dragged Height untuk baris timeline (null = otomatis pas baris / auto-fit)
+  const [customTracksHeight, setCustomTracksHeight] = useState<number | null>(() => {
+    try {
+      const saved = localStorage.getItem('capcut_timeline_custom_height');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [, setIsResizingHeight] = useState<boolean>(false);
+  const dragStartYRef = useRef<number>(0);
+  const dragStartHeightRef = useRef<number>(0);
 
   // Audio Clips for CapCut track splitting & dragging
   const [audioClips, setAudioClips] = useState<
@@ -461,6 +488,8 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
         widthPct: 100,
         duration: effectiveDuration,
         mediaType,
+        visualEffect: backgroundConfig.customImageVisualEffect || 'none',
+        visualEffectIntensity: backgroundConfig.customImageVisualEffectIntensity,
       });
     }
 
@@ -882,6 +911,42 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
           : `✨ Efek ${opt?.shortLabel || effect} aktif pada slide #${targetIndex + 1} (${formatSec(slides[targetIndex].startSec)} - ${formatSec(slides[targetIndex].endSec)})!`
       );
     }
+  };
+
+  const handleSetBRollVisualEffect = (
+    clipId: string,
+    effect: VisualEffectType,
+    intensity: number = 0.8
+  ) => {
+    const currentClips = backgroundConfig.bRoll?.clips || [];
+    const targetIdx = currentClips.findIndex((c) => c.id === clipId);
+    if (targetIdx === -1) return;
+
+    const updatedClips = currentClips.map((c) =>
+      c.id === clipId
+        ? {
+            ...c,
+            visualEffect: effect,
+            visualEffectIntensity: intensity,
+          }
+        : c
+    );
+
+    onBackgroundChange({
+      ...backgroundConfig,
+      bRoll: {
+        ...backgroundConfig.bRoll,
+        enabled: true,
+        clips: updatedClips,
+      },
+    });
+
+    const opt = VISUAL_EFFECT_OPTIONS.find((o) => o.id === effect);
+    setStatusMessage(
+      effect === 'none'
+        ? `⚪ Efek visual klip B-Roll "${currentClips[targetIdx].name}" dinonaktifkan.`
+        : `✨ Efek ${opt?.shortLabel || effect} aktif pada klip B-Roll "${currentClips[targetIdx].name}"!`
+    );
   };
 
   const handleAddTimelineFxAtPlayhead = (effect: VisualEffectType) => {
@@ -1553,6 +1618,104 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
     return count;
   }, [trackVisibility]);
 
+  // Mode Ukuran Baris (Ramping / Compact vs Normal)
+  const trackHeights = useMemo(() => {
+    if (isCompactHeight) {
+      return {
+        ruler: 20,
+        rulerClass: 'h-5',
+        audio: 40,
+        audioClass: 'h-10',
+        media: 40,
+        mediaClass: 'h-10',
+        broll: 34,
+        brollClass: 'h-[34px]',
+        subtitle: 32,
+        subtitleClass: 'h-8',
+      };
+    }
+    return {
+      ruler: 24,
+      rulerClass: 'h-6',
+      audio: 58,
+      audioClass: 'h-14 sm:h-[58px]',
+      media: 58,
+      mediaClass: 'h-14 sm:h-[58px]',
+      broll: 50,
+      brollClass: 'h-12 sm:h-[50px]',
+      subtitle: 44,
+      subtitleClass: 'h-11 sm:h-[44px]',
+    };
+  }, [isCompactHeight]);
+
+  // Kalkulasi tinggi optimal area baris timeline berdasarkan baris yang sedang aktif
+  const effectiveTracksHeight = useMemo(() => {
+    if (hiddenTracksCount === 4) return 36;
+    let total = trackHeights.ruler;
+    if (trackVisibility.audio) total += trackHeights.audio;
+    if (trackVisibility.media) total += trackHeights.media;
+    if (trackVisibility.broll) total += trackHeights.broll;
+    if (trackVisibility.subtitle) total += trackHeights.subtitle;
+    return total;
+  }, [trackVisibility, trackHeights, hiddenTracksCount]);
+
+  // Pastikan tinggi timeline tidak melebihi tinggi baris aktif agar TIDAK ADA ruang kosong di bawah
+  const appliedTracksHeight = useMemo(() => {
+    if (hiddenTracksCount === 4) return 36;
+    if (customTracksHeight !== null) {
+      return Math.min(customTracksHeight, effectiveTracksHeight);
+    }
+    return effectiveTracksHeight;
+  }, [customTracksHeight, effectiveTracksHeight, hiddenTracksCount]);
+
+  const handleResizerMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizingHeight(true);
+    dragStartYRef.current = e.clientY;
+    dragStartHeightRef.current = appliedTracksHeight;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaY = moveEvent.clientY - dragStartYRef.current;
+      const newHeight = Math.max(36, Math.min(500, dragStartHeightRef.current - deltaY));
+      setCustomTracksHeight(newHeight);
+      try {
+        localStorage.setItem('capcut_timeline_custom_height', JSON.stringify(newHeight));
+      } catch {}
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingHeight(false);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  const handleResetTimelineHeight = () => {
+    setCustomTracksHeight(null);
+    try {
+      localStorage.removeItem('capcut_timeline_custom_height');
+    } catch {}
+    setStatusMessage('↕️ Tinggi timeline otomatis pas dengan baris yang aktif.');
+  };
+
+  const toggleCompactMode = () => {
+    setIsCompactHeight((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('capcut_timeline_compact_mode', JSON.stringify(next));
+      } catch {}
+      setCustomTracksHeight(null);
+      try {
+        localStorage.removeItem('capcut_timeline_custom_height');
+      } catch {}
+      setStatusMessage(next ? '📐 Mode Ramping aktif: ruang layar preview kini lebih luas!' : '↕️ Mode Normal aktif.');
+      return next;
+    });
+  };
+
   // Dragging & Sliding Audio Clip (Geser Klip Bebas Horizontal & Trim Tepi)
   const handleAudioClipMouseDown = (
     e: React.MouseEvent,
@@ -1937,6 +2100,18 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
 
   return (
     <div className="w-full bg-[#07090F] border-t border-white/10 flex flex-col select-none shrink-0 z-20 shadow-2xl transition-all duration-300">
+      {/* Draggable Divider Handle between Preview Canvas & Timeline */}
+      <div
+        onMouseDown={handleResizerMouseDown}
+        onDoubleClick={handleResetTimelineHeight}
+        className="h-2 w-full bg-[#07090F] hover:bg-cyan-500/25 active:bg-cyan-500/40 cursor-row-resize flex items-center justify-center group relative z-30 transition-colors select-none"
+        title="Tarik ke atas/bawah untuk atur tinggi timeline & preview (Double-klik untuk otomatis pas baris aktif)"
+      >
+        <div className="w-12 h-1 rounded-full bg-slate-600 group-hover:bg-cyan-400 group-active:bg-cyan-300 transition-colors shadow-sm flex items-center justify-center">
+          <div className="w-3 h-0.5 bg-white/40 rounded-full" />
+        </div>
+      </div>
+
       {/* ========================================================= */}
       {/* 1. CAPCUT / CLIPCHAMP EDITING TOOLBAR                      */}
       {/* ========================================================= */}
@@ -2482,6 +2657,36 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
             </button>
           </div>
 
+          {/* Mode Ramping / Normal Toggle Button */}
+          <button
+            onClick={toggleCompactMode}
+            className={`px-2 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-all ${
+              isCompactHeight
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/40 shadow-xs'
+                : 'text-slate-400 hover:text-white hover:bg-white/5 border border-transparent'
+            }`}
+            title={
+              isCompactHeight
+                ? 'Mode Ramping aktif (Klik untuk beralih ke Mode Normal)'
+                : 'Beralih ke Mode Ramping (Mengecilkan tinggi baris agar layar preview lebih luas)'
+            }
+          >
+            {isCompactHeight ? <Minimize2 className="w-3.5 h-3.5 text-cyan-400" /> : <Maximize2 className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">{isCompactHeight ? 'Ramping' : 'Normal'}</span>
+          </button>
+
+          {/* Reset Auto-Fit button if custom height is active */}
+          {customTracksHeight !== null && (
+            <button
+              onClick={handleResetTimelineHeight}
+              className="px-1.5 py-1 rounded-lg text-[11px] text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 border border-amber-400/30 flex items-center gap-1 transition-all"
+              title="Kembalikan tinggi timeline otomatis pas dengan baris yang tampil"
+            >
+              <ArrowLeftRight className="w-3 h-3 rotate-90" />
+              <span className="hidden md:inline">Auto-Fit</span>
+            </button>
+          )}
+
           {/* Expand/Collapse Timeline */}
           <button
             onClick={() => setIsExpanded(!isExpanded)}
@@ -2541,7 +2746,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
                 <button
                   onClick={() => {
                     // If multiImageSlides is empty but multiImageUrls exists, materialize first
-                    if (!backgroundConfig.multiImageSlides || backgroundConfig.multiImageSlides.length === 0) {
+                    if (backgroundConfig.type !== 'custom_image' && (!backgroundConfig.multiImageSlides || backgroundConfig.multiImageSlides.length === 0)) {
                       handleSetSlideVisualEffect(0, 'none');
                     }
                     setIsAiEffectModalOpen(true);
@@ -2756,7 +2961,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
 
                 <button
                   onClick={() => {
-                    onBackgroundChange({ ...backgroundConfig, type: 'preset_grid', multiImageUrls: [] });
+                    onBackgroundChange({ ...backgroundConfig, type: 'preset_grid', multiImageUrls: [], multiImageSlides: [] });
                     setStatusMessage('🗑️ Slideshow dihapus dari timeline.');
                   }}
                   className="p-1 rounded-lg hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition-all"
@@ -2768,11 +2973,14 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
             </div>
           )}
 
-          <div className="flex flex-col h-60 sm:h-72 relative overflow-hidden">
+          <div
+            className="flex flex-col relative overflow-hidden transition-[height] duration-150 select-none"
+            style={{ height: `${appliedTracksHeight}px` }}
+          >
             {/* Left Track Headers (CapCut Track Sidebar) */}
             <div className="absolute left-0 top-0 bottom-0 w-24 sm:w-32 bg-[#090D17] border-r border-white/10 z-20 flex flex-col text-[10px] font-bold text-slate-400">
               {/* Ruler Header Corner */}
-              <div className="h-6 border-b border-white/10 px-2 flex items-center justify-between text-slate-500 font-mono text-[9px] bg-black/40">
+              <div className={`${trackHeights.rulerClass} border-b border-white/10 px-2 flex items-center justify-between text-slate-500 font-mono text-[9px] bg-black/40`}>
                 <span>TRACKS</span>
                 {hiddenTracksCount > 0 ? (
                   <button
@@ -2790,7 +2998,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
 
               {/* Track 1: Audio Header */}
               {trackVisibility.audio && (
-                <div className="h-14 sm:h-16 border-b border-white/5 px-2 flex flex-col justify-center gap-0.5 bg-cyan-950/20 text-cyan-300 group/th">
+                <div className={`${trackHeights.audioClass} border-b border-white/5 px-2 flex flex-col justify-center gap-0.5 bg-cyan-950/20 text-cyan-300 group/th`}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1 truncate">
                       <Music className="w-3 h-3 text-cyan-400 shrink-0" />
@@ -2817,7 +3025,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
                   onDragEnter={handleMediaDragOver}
                   onDragLeave={handleMediaDragLeave}
                   onDrop={handleMediaDrop}
-                  className={`h-14 sm:h-16 border-b border-white/5 px-2 flex flex-col justify-center gap-0.5 transition-colors group/th ${
+                  className={`${trackHeights.mediaClass} border-b border-white/5 px-2 flex flex-col justify-center gap-0.5 transition-colors group/th ${
                     isDraggingMediaOver ? 'bg-emerald-800/40 text-emerald-200' : 'bg-emerald-950/20 text-emerald-300'
                   }`}
                 >
@@ -2863,7 +3071,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
 
               {/* Track 2.5: B-Roll / Cutaway Header */}
               {trackVisibility.broll && (
-                <div className="h-12 sm:h-14 border-b border-white/5 px-2 flex flex-col justify-center gap-0.5 bg-violet-950/25 text-violet-300 group/th">
+                <div className={`${trackHeights.brollClass} border-b border-white/5 px-2 flex flex-col justify-center gap-0.5 bg-violet-950/25 text-violet-300 group/th`}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1 truncate">
                       <Film className="w-3 h-3 text-violet-400 shrink-0" />
@@ -2921,7 +3129,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
 
               {/* Track 3: Subtitle / Lyric Header */}
               {trackVisibility.subtitle && (
-                <div className="h-11 sm:h-12 px-2 flex flex-col justify-center gap-0.5 bg-amber-950/20 text-amber-300 group/th">
+                <div className={`${trackHeights.subtitleClass} px-2 flex flex-col justify-center gap-0.5 bg-amber-950/20 text-amber-300 group/th`}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1 truncate">
                       <Type className="w-3 h-3 text-amber-400 shrink-0" />
@@ -2977,6 +3185,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
             ref={timelineContainerRef}
             onMouseDown={handleTimelineMouseDown}
             className="flex-1 ml-24 sm:ml-32 overflow-x-auto overflow-y-hidden relative custom-scrollbar cursor-crosshair bg-[#060810]"
+            style={{ height: `${appliedTracksHeight}px` }}
           >
             {/* Inner Content Sized According to Zoom Level */}
             <div
@@ -2986,7 +3195,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
               {/* ---------------------------------------------------- */}
               {/* A. TIME RULER (Top Bar with Second Ticks)             */}
               {/* ---------------------------------------------------- */}
-              <div className="h-6 bg-[#0B0F1B] border-b border-white/10 relative text-[9px] font-mono text-slate-400">
+              <div className={`${trackHeights.rulerClass} bg-[#0B0F1B] border-b border-white/10 relative text-[9px] font-mono text-slate-400`}>
                 {rulerTicks.map((tick, i) => (
                   <div
                     key={i}
@@ -3003,7 +3212,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
               {/* B. TRACK 1: AUDIO WAVEFORM TRACK (CapCut Multi-Clip) */}
               {/* ---------------------------------------------------- */}
               {trackVisibility.audio && (
-                <div className="h-14 sm:h-16 border-b border-white/5 relative p-1 flex items-center bg-[#070A14]">
+                <div className={`${trackHeights.audioClass} border-b border-white/5 relative p-1 flex items-center bg-[#070A14]`}>
                 {/* Ruang Kosong (Gaps Antar Klip Ala CapCut) */}
                 {audioGaps.map((gap) => {
                   const gapStartPct = (gap.start / effectiveDuration) * 100;
@@ -3215,7 +3424,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
             {/* C. TRACK 2: IMAGE / MEDIA TRACK                      */}
             {/* ---------------------------------------------------- */}
             {trackVisibility.media && (
-              <div className="h-14 sm:h-16 border-b border-white/5 relative p-1 flex items-center">
+              <div className={`${trackHeights.mediaClass} border-b border-white/5 relative p-1 flex items-center`}>
                 <div
                   onClick={() => setSelectedClip('image')}
                   onDragOver={handleMediaDragOver}
@@ -3353,20 +3562,34 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
                                     <span className="text-cyan-400 font-bold ml-1">({clip.duration.toFixed(1)}s)</span>
                                   )}
                                 </div>
-                                {clip.type === 'slide' && (
+                                {(clip.type === 'slide' || clip.id === 'bg-single') && (
                                   <div className="flex items-center ml-1" onClick={(e) => e.stopPropagation()}>
                                     <select
                                       value={clip.visualEffect || 'none'}
                                       onChange={(e) => {
                                         e.stopPropagation();
-                                        handleSetSlideVisualEffect(clip.originalIndex ?? clip.id, e.target.value as VisualEffectType);
+                                        if (clip.id === 'bg-single') {
+                                          onBackgroundChange({
+                                            ...backgroundConfig,
+                                            customImageVisualEffect: e.target.value as VisualEffectType,
+                                            customImageVisualEffectIntensity: 0.8,
+                                          });
+                                          const opt = VISUAL_EFFECT_OPTIONS.find((o) => o.id === e.target.value);
+                                          setStatusMessage(
+                                            e.target.value === 'none'
+                                              ? '⚪ Efek visual Background dinonaktifkan.'
+                                              : `✨ Efek ${opt?.shortLabel || e.target.value} aktif pada Background Video!`
+                                          );
+                                        } else {
+                                          handleSetSlideVisualEffect(clip.originalIndex ?? clip.id, e.target.value as VisualEffectType);
+                                        }
                                       }}
                                       className={`text-[8px] font-bold px-1.5 py-0.5 rounded border outline-none cursor-pointer ${
                                         clip.visualEffect && clip.visualEffect !== 'none'
                                           ? VISUAL_EFFECT_OPTIONS.find((o) => o.id === clip.visualEffect)?.badgeClass || 'bg-amber-500/25 text-amber-300 border-amber-500/40'
                                           : 'bg-black/60 text-slate-400 border-white/10 hover:text-white'
                                       }`}
-                                      title="Pilih Efek Kamera Visual untuk frame/slide ini saja"
+                                      title="Pilih Efek Kamera Visual untuk frame/video ini"
                                     >
                                       {VISUAL_EFFECT_OPTIONS.map((opt) => (
                                         <option key={opt.id} value={opt.id} className="bg-slate-900 text-white">
@@ -3450,7 +3673,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
               {/* D. TRACK 2.5: B-ROLL / CUTAWAY OVERLAYS TRACK         */}
               {/* ---------------------------------------------------- */}
               {trackVisibility.broll && (
-                <div className="h-12 sm:h-14 border-b border-white/5 relative p-1 flex items-center">
+                <div className={`${trackHeights.brollClass} border-b border-white/5 relative p-1 flex items-center`}>
                 <div
                   onClick={() => {
                     setSelectedClip('broll');
@@ -3522,6 +3745,29 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
                             </span>
                           </div>
 
+                          {/* Visual Effect Selector for B-Roll */}
+                          <div className="flex items-center ml-auto mr-1" onClick={(e) => e.stopPropagation()}>
+                            <select
+                              value={bClip.visualEffect || 'none'}
+                              onChange={(e) => {
+                                e.stopPropagation();
+                                handleSetBRollVisualEffect(bClip.id, e.target.value as VisualEffectType);
+                              }}
+                              className={`text-[8px] font-bold px-1.5 py-0.5 rounded border outline-none cursor-pointer ${
+                                bClip.visualEffect && bClip.visualEffect !== 'none'
+                                  ? VISUAL_EFFECT_OPTIONS.find((o) => o.id === bClip.visualEffect)?.badgeClass || 'bg-amber-500/25 text-amber-300 border-amber-500/40'
+                                  : 'bg-black/60 text-slate-400 border-white/10 hover:text-white'
+                              }`}
+                              title="Pilih Efek Kamera Visual untuk klip B-Roll ini"
+                            >
+                              {VISUAL_EFFECT_OPTIONS.map((opt) => (
+                                <option key={opt.id} value={opt.id} className="bg-slate-900 text-white">
+                                  {opt.icon} {opt.shortLabel}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
                           {/* Quick Actions on Selected B-Roll clip */}
                           {isSelected && (
                             <div className="flex items-center gap-1 shrink-0 ml-1 z-30">
@@ -3579,7 +3825,7 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
             {/* E. TRACK 3: SUBTITLE / LYRIC BLOCKS TRACK             */}
             {/* ---------------------------------------------------- */}
             {trackVisibility.subtitle && (
-              <div className="h-11 sm:h-12 relative p-1 flex items-center">
+              <div className={`${trackHeights.subtitleClass} relative p-1 flex items-center`}>
                 <div
                   onClick={() => setSelectedClip('subtitle')}
                   className="w-full h-full rounded-xl bg-amber-950/20 border border-amber-500/20 relative overflow-hidden"
@@ -3633,14 +3879,14 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
               </div>
             )}
 
-            {/* If all tracks are hidden */}
+            {/* If all tracks are hidden: sleek minimal strip */}
             {hiddenTracksCount === 4 && (
-              <div className="h-44 flex flex-col items-center justify-center gap-2 text-slate-400 select-none">
-                <EyeOff className="w-8 h-8 text-slate-500 stroke-[1.5]" />
-                <span className="text-xs font-semibold">Semua baris media disembunyikan</span>
+              <div className="h-full flex items-center justify-center gap-2.5 text-slate-400 select-none px-3 bg-[#080B14]">
+                <EyeOff className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="text-[11px] font-semibold text-slate-300 truncate">Semua baris timeline disembunyikan</span>
                 <button
                   onClick={showAllTracks}
-                  className="px-3 py-1 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-400/30 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                  className="px-2.5 py-0.5 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-400/30 rounded-lg text-[10px] font-bold transition-all cursor-pointer shrink-0"
                 >
                   Tampilkan Semua Baris
                 </button>
@@ -3777,20 +4023,114 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
       <AiVisualEffectsModal
         isOpen={isAiEffectModalOpen}
         onClose={() => setIsAiEffectModalOpen(false)}
-        slides={backgroundConfig.multiImageSlides || []}
+        slides={[
+          ...(backgroundConfig.type === 'custom_image' && backgroundConfig.customImageUrl
+            ? [
+                {
+                  id: 'bg-custom',
+                  url: backgroundConfig.customImageUrl,
+                  name: getMediaUrlType(backgroundConfig.customImageUrl) === 'video' ? 'Background Video' : 'Background Image',
+                  startSec: 0,
+                  endSec: effectiveDuration,
+                  mediaType: getMediaUrlType(backgroundConfig.customImageUrl) === 'video' ? ('video' as const) : ('image' as const),
+                  visualEffect: backgroundConfig.customImageVisualEffect || 'none',
+                  visualEffectIntensity: backgroundConfig.customImageVisualEffectIntensity,
+                },
+              ]
+            : backgroundConfig.multiImageSlides || []),
+          ...(backgroundConfig.bRoll?.clips || []).map((b) => ({
+            id: b.id,
+            url: b.url,
+            name: `B-Roll: ${b.name}`,
+            startSec: b.startSec,
+            endSec: b.endSec,
+            mediaType: b.mediaType || 'video',
+            visualEffect: b.visualEffect || 'none',
+            visualEffectIntensity: b.visualEffectIntensity,
+          })),
+        ]}
         lyrics={subtitleConfig.lyrics || []}
         duration={effectiveDuration}
         onApplyEffects={(updatedSlides) => {
-          onBackgroundChange({
-            ...backgroundConfig,
-            type: 'multi_image',
-            multiImageSlides: updatedSlides,
-          });
-          const count = updatedSlides.filter((s) => s.visualEffect && s.visualEffect !== 'none').length;
-          setStatusMessage(`✨ Berhasil memasang efek kamera AI ke ${count} frame!`);
+          const currentBRollClips = backgroundConfig.bRoll?.clips || [];
+          const bRollMap = new Map(
+            updatedSlides
+              .filter((s) => currentBRollClips.some((b) => b.id === s.id))
+              .map((s) => [s.id, s])
+          );
+
+          let updatedBRollClips: BRollClip[] | undefined = undefined;
+          if (bRollMap.size > 0 && currentBRollClips.length > 0) {
+            updatedBRollClips = currentBRollClips.map((b) => {
+              const matched = bRollMap.get(b.id);
+              if (matched) {
+                return {
+                  ...b,
+                  visualEffect: matched.visualEffect,
+                  visualEffectIntensity: matched.visualEffectIntensity,
+                };
+              }
+              return b;
+            });
+          }
+
+          const newBRollConfig: BRollConfig | undefined = updatedBRollClips
+            ? {
+                enabled: backgroundConfig.bRoll?.enabled ?? true,
+                defaultDisplayMode: backgroundConfig.bRoll?.defaultDisplayMode,
+                defaultPipPosition: backgroundConfig.bRoll?.defaultPipPosition,
+                globalOpacity: backgroundConfig.bRoll?.globalOpacity,
+                clips: updatedBRollClips,
+              }
+            : backgroundConfig.bRoll;
+
+          if (backgroundConfig.type === 'custom_image') {
+            const bgCustomSlide = updatedSlides.find((s) => s.id === 'bg-custom');
+            onBackgroundChange({
+              ...backgroundConfig,
+              customImageVisualEffect: bgCustomSlide ? bgCustomSlide.visualEffect : 'none',
+              customImageVisualEffectIntensity: bgCustomSlide ? bgCustomSlide.visualEffectIntensity : 0.8,
+              bRoll: newBRollConfig,
+            });
+            const activeCount = updatedSlides.filter((s) => s.visualEffect && s.visualEffect !== 'none').length;
+            setStatusMessage(`✨ Berhasil memasang efek visual AI ke background & B-roll (${activeCount} aktif)!`);
+          } else {
+            const nonBRollSlides = updatedSlides.filter(
+              (s) => !currentBRollClips.some((b) => b.id === s.id)
+            );
+            onBackgroundChange({
+              ...backgroundConfig,
+              type: 'multi_image',
+              multiImageSlides: nonBRollSlides,
+              bRoll: newBRollConfig,
+            });
+            const activeCount = updatedSlides.filter((s) => s.visualEffect && s.visualEffect !== 'none').length;
+            setStatusMessage(`✨ Berhasil memasang efek kamera AI ke ${activeCount} frame & B-roll!`);
+          }
         }}
         onClearAllEffects={() => {
-          if (backgroundConfig.multiImageSlides) {
+          const clearedBRoll = backgroundConfig.bRoll?.clips?.map((b) => ({
+            ...b,
+            visualEffect: 'none' as VisualEffectType,
+          }));
+
+          const clearedBRollConfig: BRollConfig | undefined = clearedBRoll
+            ? {
+                enabled: backgroundConfig.bRoll?.enabled ?? true,
+                defaultDisplayMode: backgroundConfig.bRoll?.defaultDisplayMode,
+                defaultPipPosition: backgroundConfig.bRoll?.defaultPipPosition,
+                globalOpacity: backgroundConfig.bRoll?.globalOpacity,
+                clips: clearedBRoll,
+              }
+            : backgroundConfig.bRoll;
+
+          if (backgroundConfig.type === 'custom_image') {
+            onBackgroundChange({
+              ...backgroundConfig,
+              customImageVisualEffect: 'none',
+              bRoll: clearedBRollConfig,
+            });
+          } else if (backgroundConfig.multiImageSlides) {
             const cleared = backgroundConfig.multiImageSlides.map((s) => ({
               ...s,
               visualEffect: 'none' as VisualEffectType,
@@ -3798,9 +4138,10 @@ export const CapCutTimeline: React.FC<CapCutTimelineProps> = ({
             onBackgroundChange({
               ...backgroundConfig,
               multiImageSlides: cleared,
+              bRoll: clearedBRollConfig,
             });
           }
-          setStatusMessage('🗑️ Semua efek kamera frame dihapus.');
+          setStatusMessage('🗑️ Semua efek kamera frame & B-roll dihapus.');
         }}
       />
 

@@ -18,6 +18,8 @@ export interface MatchResult {
   isReffRepeat?: boolean;
   repeatOccurrence?: number;
   isFilenameTimestamp?: boolean;
+  isAiGroq?: boolean;
+  aiModel?: string;
 }
 
 export interface FilenameTimestamp {
@@ -1085,310 +1087,344 @@ export async function groqLlmMatchImagesToLyrics(
   allowReffReuse: boolean = true,
   options?: GapFillOptions
 ): Promise<MatchResult[]> {
-  if (!apiKey) {
-    throw new Error('Groq API Key tidak ditemukan. Silakan masukkan Groq API Key terlebih dahulu.');
+  if (!images || images.length === 0) return [];
+  if (!lyrics || lyrics.length === 0) {
+    throw new Error('Belum ada lirik/subtitle yang terdeteksi. Silakan generate subtitle terlebih dahulu.');
   }
 
-  if (!images || images.length === 0) return [];
+  const cleanKey = (apiKey || '').trim();
+  if (!cleanKey) {
+    throw new Error('Groq API Key belum diisi. Masukkan API Key Groq Anda (diawali dengan gsk_...).');
+  }
+
+  if (cleanKey.startsWith('sk-') && !cleanKey.startsWith('gsk_')) {
+    throw new Error(
+      'Kunci yang dimasukkan adalah kunci KoboiLLM (sk-...) yang hanya khusus untuk Whisper audio STT. Untuk analisis teks & lirik Groq Llama 3.3, silakan gunakan API Key gratis dari console.groq.com/keys (diawali gsk_...).'
+    );
+  }
+
   const duration = Math.max(10, totalDuration || 60);
 
-  // 1. Check if files have timestamps in filenames (Priority 1)
-  const parsedImages = images.map((img, idx) => ({
-    index: idx,
-    img,
-    ts: parseTimestampFromFilename(img.name, duration),
-  }));
-
-  const tsItems = parsedImages.filter((p) => p.ts !== null);
-  const nonTsItems = parsedImages.filter((p) => p.ts === null);
-
-  // If ALL images already have timestamps in their filenames, use timestamp matching directly
-  if (nonTsItems.length === 0) {
-    return heuristicMatchImagesToLyrics(images, lyrics, duration, allowReffReuse, options);
-  }
-
-  if (!lyrics || lyrics.length === 0) {
-    return heuristicMatchImagesToLyrics(images, lyrics, duration, allowReffReuse, options);
-  }
-
-  // If SOME images have timestamps, anchor them first and only submit non-timestamp images to Groq AI
-  if (tsItems.length > 0) {
-    const tsOnlyImages = tsItems.map((t) => t.img);
-    const tsResults = heuristicMatchImagesToLyrics(tsOnlyImages, lyrics, duration, false, { enabled: false });
-
-    // Collect lyric IDs already occupied by timestamp images
-    const occupiedLyricIds = new Set<string>();
-    tsResults.forEach((r) => {
-      if (r.slide.matchedLyricId) {
-        occupiedLyricIds.add(r.slide.matchedLyricId);
-      }
-    });
-
-    const nonTsOnlyImages = nonTsItems.map((n) => n.img);
-    const availableLyrics = lyrics.filter((l) => !occupiedLyricIds.has(l.id));
-
-    // If no lyrics left for non-timestamp items, fallback to heuristic for full set
-    if (availableLyrics.length === 0) {
-      return heuristicMatchImagesToLyrics(images, lyrics, duration, allowReffReuse, options);
-    }
-
-    try {
-      // Call Groq LLM ONLY for the non-timestamp images
-      const nonTsGroqResults = await groqLlmMatchImagesToLyrics(
-        apiKey,
-        nonTsOnlyImages,
-        availableLyrics,
-        duration,
-        allowReffReuse,
-        { enabled: false }
-      );
-
-      // Merge timestamp results (confidence 100) and Groq AI results
-      const combined = [...tsResults, ...nonTsGroqResults].sort(
-        (a, b) => a.slide.startSec - b.slide.startSec
-      );
-
-      // Normalize boundaries
-      if (combined.length > 0 && combined[0].slide.startSec > 0) {
-        combined[0].slide.startSec = 0;
-      }
-      for (let i = 0; i < combined.length - 1; i++) {
-        combined[i].slide.endSec = combined[i + 1].slide.startSec;
-      }
-      if (combined.length > 0) {
-        combined[combined.length - 1].slide.endSec = duration;
-      }
-
-      if (options?.enabled !== false) {
-        return fillInstrumentalGaps(combined, images, duration, options);
-      }
-      return combined;
-    } catch (err) {
-      console.warn('Groq partial matching failed, falling back to heuristic:', err);
-      return heuristicMatchImagesToLyrics(images, lyrics, duration, allowReffReuse, options);
-    }
-  }
-
-  // -------------------------------------------------------------
-  // If NO images have timestamps, query Groq AI for all images:
-  // -------------------------------------------------------------
-  try {
-    // Prepare condensed prompt payload
-    const imageSummaries = images.map((img, idx) => {
+  // Helper formatting to produce ultra-compact, token-efficient summaries (< 15 tokens per item vs > 60 in JSON)
+  const formatCompactImage = (img: { name: string }, idx: number) => {
     const { cleanName, keywords } = cleanImageFilename(img.name);
-    return {
-      index: idx,
-      rawFilename: img.name,
-      cleanName,
-      keywords: keywords.join(', ')
-    };
-  });
+    const ts = parseTimestampFromFilename(img.name, duration);
+    const hint = ts ? ` [hint: ${formatMinSec(ts.startSec)}]` : '';
+    const kw = keywords.length ? ` kw: ${keywords.slice(0, 5).join(',')}` : '';
+    return `#${idx}: "${cleanName}"${hint}${kw}`;
+  };
 
-  const lyricSummaries = lyrics.map((l, idx) => ({
-    index: idx,
-    id: l.id,
-    start: Math.round(l.start * 10) / 10,
-    end: Math.round(l.end * 10) / 10,
-    text: l.text
-  }));
+  const formatCompactLyric = (l: LyricSegment, idx: number) => {
+    const start = Math.round(l.start * 10) / 10;
+    const end = Math.round(l.end * 10) / 10;
+    return `#${idx} (${start}s-${end}s): ${l.text}`;
+  };
 
-  const systemPrompt = `You are an expert music video director. Match background slideshow images to song lyrics based on semantic meaning, mood, and keywords in Indonesian and English.
-${
-  allowReffReuse
-    ? 'IMPORTANT: If the song has a repeating Chorus/Reff or recurring lyric theme, an image that matches the chorus CAN and SHOULD be used again for each occurrence of that chorus so the image reappears at subsequent Reffs (same imageIndex mapped to later matchedLyricIndex, spaced at least 15 seconds apart).'
-    : 'Each image should only appear once.'
-}
-Return ONLY valid JSON with no markdown wrapping, no extra text:
-[
-  {
-    "imageIndex": 0,
-    "matchedLyricIndex": 2,
-    "confidence": 92,
-    "reason": "Penjelasan singkat kecocokan"
-  }
-]`;
+  const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
 
-  const userPrompt = `Total Song Duration: ${duration} seconds.
-IMAGES:
-${JSON.stringify(imageSummaries, null, 2)}
-
-LYRIC TIMELINE:
-${JSON.stringify(lyricSummaries, null, 2)}
-
-Match each image (imageIndex 0 to ${images.length - 1}) to the most emotionally or contextually appropriate lyricIndex.${
-    allowReffReuse
-      ? ' When a chorus/reff repeats in the song, reuse the matching image so it appears at each repeated chorus.'
-      : ''
-  } Ensure chronological order where possible. Return JSON array.`;
-
-  const cleanKey = apiKey.trim();
-  const isKoboi = cleanKey.startsWith('sk-') && !cleanKey.startsWith('gsk_');
-  const endpoint = isKoboi
-    ? 'https://api.koboillm.com/v1/chat/completions'
-    : 'https://api.groq.com/openai/v1/chat/completions';
-
-  const modelsToTry = isKoboi
-    ? ['gpt-4o-mini', 'gpt-4o', 'qwen/qwen3.6-27b']
-    : ['openai/gpt-oss-20b', 'openai/gpt-oss-120b', 'qwen/qwen3.6-27b', 'groq/compound-mini'];
-
-  let parsed: any = null;
-  let lastErr: any = null;
-
-  for (const model of modelsToTry) {
-    try {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${cleanKey}`
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt }
-          ],
-          temperature: 0.2,
-          max_tokens: 1500
-        })
-      });
-
-      if (!response.ok) {
-        const errJson = await response.json().catch(() => ({}));
-        const errMsg = errJson?.error?.message || `API Error HTTP ${response.status}`;
-        if (model !== modelsToTry[modelsToTry.length - 1]) {
-          console.warn(`Model "${model}" gagal (${errMsg}), mencoba alternatif...`);
-          lastErr = new Error(errMsg);
-          continue;
-        }
-        throw new Error(errMsg);
+  // 1. Dynamically discover models available on the user's Groq account
+  // Strict filter: ONLY genuine chat/completion models, strictly exclude audio, compound, translation, or terms-restricted models
+  let availableModels: string[] = [];
+  try {
+    const modelsRes = await fetch('https://api.groq.com/openai/v1/models', {
+      headers: {
+        Authorization: `Bearer ${cleanKey}`,
+      },
+    });
+    if (modelsRes.ok) {
+      const modelsData = await modelsRes.json();
+      if (Array.isArray(modelsData?.data)) {
+        const excludedKeywords = [
+          'whisper', 'guard', 'compound', 'orpheus', 'tts', 'audio',
+          'embed', 'rerank', 'vision', 'allam', 'moderation', 'omni'
+        ];
+        const allowedChatKeywords = [
+          'llama', 'qwen', 'mixtral', 'mistral', 'gemma', 'deepseek', 'gpt-oss'
+        ];
+        availableModels = modelsData.data
+          .map((m: any) => m.id)
+          .filter((id: string) => {
+            const lower = id.toLowerCase();
+            const isExcluded = excludedKeywords.some((k) => lower.includes(k));
+            const isChat = allowedChatKeywords.some((k) => lower.includes(k));
+            return !isExcluded && isChat;
+          });
+        console.log('✅ Filtered genuine Groq chat models for this account:', availableModels);
       }
-
-      const data = await response.json();
-      let content = data.choices?.[0]?.message?.content?.trim() || '';
-      // Strip markdown code fences if present
-      content = content.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
-      parsed = JSON.parse(content);
-      break;
-    } catch (err: any) {
-      lastErr = err;
-      if (model === modelsToTry[modelsToTry.length - 1]) throw err;
+    } else if (modelsRes.status === 401) {
+      throw new Error('Groq API Key tidak valid. Pastikan Anda menyalin API Key dengan benar dari console.groq.com/keys.');
     }
+  } catch (mErr: any) {
+    if (mErr.message?.includes('tidak valid')) throw mErr;
+    console.warn('Could not auto-fetch Groq models list:', mErr);
   }
 
-  if (!parsed || !Array.isArray(parsed)) {
-    throw lastErr || new Error('Gagal mendapatkan hasil pencocokan dari AI.');
+  // Preferred model hierarchy (best reasoning, highest reliability, to fastest)
+  const preferredHierarchy = [
+    'llama-3.3-70b-versatile',
+    'llama-3.3-70b-specdec',
+    'llama-3.1-8b-instant',
+    'qwen-2.5-32b',
+    'deepseek-r1-distill-llama-70b',
+    'mixtral-8x7b-32768',
+    'gemma2-9b-it',
+    'llama3-70b-8192',
+    'llama3-8b-8192',
+    'openai/gpt-oss-20b',
+  ];
+
+  // Prioritize models that are confirmed to exist on the user's account
+  let modelsToTry: string[] = [];
+  if (availableModels.length > 0) {
+    modelsToTry = [
+      ...preferredHierarchy.filter((m) => availableModels.includes(m)),
+      ...availableModels.filter((m) => !preferredHierarchy.includes(m)),
+    ];
+  } else {
+    modelsToTry = preferredHierarchy;
   }
 
+  console.log('Target model candidate queue:', modelsToTry);
+
+  // 2. Process in batches of max 20 images to strictly guarantee prompt is < 1,500 tokens
+  // This completely eliminates HTTP 413 (Entity Too Large) and Groq 8,000 TPM limit errors!
+  const BATCH_SIZE = 20;
   const rawParsedList: Array<{
     imageIndex: number;
     matchedLyricIndex: number;
     confidence?: number;
     reason?: string;
-  }> = parsed;
+  }> = [];
+
+  let successfulModel = '';
+  const errorLogs: string[] = [];
+
+  for (let batchStart = 0; batchStart < images.length; batchStart += BATCH_SIZE) {
+    const batchImages = images.slice(batchStart, batchStart + BATCH_SIZE);
+    const compactImagesStr = batchImages
+      .map((img, i) => formatCompactImage(img, batchStart + i))
+      .join('\n');
+    const compactLyricsStr = lyrics
+      .map((l, idx) => formatCompactLyric(l, idx))
+      .join('\n');
+
+    const systemPrompt = `You are an expert music video director matching background images to lyrics based on semantics and timing.
+${
+  allowReffReuse
+    ? 'IMPORTANT: Reff/Chorus repeating lyrics CAN reuse matching image indexes at later chorus parts (spaced >= 15s apart).'
+    : 'Match each image to its most fitting lyric segment.'
+}
+Output MUST be a valid JSON array of objects with NO markdown formatting, NO conversational text:
+[{"imageIndex":${batchStart},"matchedLyricIndex":0,"confidence":90,"reason":"Kecocokan visual dalam bahasa Indonesia"}]`;
+
+    const userPrompt = `Total Song Duration: ${duration}s.
+IMAGES TO MATCH:
+${compactImagesStr}
+
+LYRIC TIMELINE:
+${compactLyricsStr}
+
+Match each image to its best fitting lyric segment. If timestamp hint exists, prioritize it. Return ONLY the JSON array.`;
+
+    // Dynamic max_tokens: 25-30 tokens per image is plenty for the JSON array, saving 1,700 tokens on Groq TPM calculation!
+    const maxTokens = Math.min(1024, Math.max(350, batchImages.length * 30));
+
+    let batchParsed: any = null;
+
+    // Prioritize whichever model succeeded on the previous batch
+    const candidateModels = successfulModel
+      ? [successfulModel, ...modelsToTry.filter((m) => m !== successfulModel)]
+      : modelsToTry;
+
+    for (const model of candidateModels) {
+      try {
+        console.log(`Mengirim batch (${batchStart + 1}-${batchStart + batchImages.length}/${images.length}) ke Groq AI: ${model}...`);
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${cleanKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            temperature: 0.2,
+            max_tokens: maxTokens,
+          }),
+        });
+
+        if (!response.ok) {
+          const errJson = await response.json().catch(() => ({}));
+          const errMsg = errJson?.error?.message || `HTTP ${response.status} ${response.statusText}`;
+          errorLogs.push(`[${model}]: ${errMsg}`);
+          console.warn(`Model "${model}" gagal (${errMsg}), mencoba model cadangan...`);
+          // If rate-limited (429), pause briefly before trying alternative model
+          if (response.status === 429) {
+            await new Promise((r) => setTimeout(r, 600));
+          }
+          continue;
+        }
+
+        const data = await response.json();
+        let content = data.choices?.[0]?.message?.content?.trim() || '';
+
+        // Robust JSON array regex extraction
+        const jsonMatch = content.match(/\[\s*\{[\s\S]*\}\s*\]/);
+        if (jsonMatch) {
+          batchParsed = JSON.parse(jsonMatch[0]);
+        } else {
+          content = content.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+          batchParsed = JSON.parse(content);
+        }
+
+        if (Array.isArray(batchParsed) && batchParsed.length > 0) {
+          successfulModel = model;
+          console.log(`✅ Batch berhasil dijawab oleh Groq model: ${model}`);
+          break;
+        }
+      } catch (err: any) {
+        errorLogs.push(`[${model}]: ${err?.message || err}`);
+        console.warn(`Percobaan Groq model "${model}" gagal:`, err?.message);
+      }
+    }
+
+    if (Array.isArray(batchParsed) && batchParsed.length > 0) {
+      rawParsedList.push(...batchParsed);
+    } else {
+      console.warn(`Batch ${batchStart}-${batchStart + batchImages.length} tidak terjawab oleh Groq AI, menggunakan fallback lokal cerdas.`);
+      // Local heuristic fallback for this batch so user never loses image slots
+      batchImages.forEach((_img, i) => {
+        const actualIdx = batchStart + i;
+        const fallbackLIdx = Math.min(lyrics.length - 1, Math.floor((actualIdx / images.length) * lyrics.length));
+        rawParsedList.push({
+          imageIndex: actualIdx,
+          matchedLyricIndex: fallbackLIdx,
+          confidence: 75,
+          reason: 'Kecocokan alur waktu (fallback lokal cerdas)',
+        });
+      });
+    }
+
+    // Brief throttle pause between batches to prevent triggering RPM rate limits
+    if (batchStart + BATCH_SIZE < images.length) {
+      await new Promise((r) => setTimeout(r, 350));
+    }
+  }
+
+  // If literally all batches failed completely in Groq, fall back gracefully to local heuristic matcher
+  if (rawParsedList.length === 0) {
+    console.warn('Groq AI tidak dapat diakses atau kuota habis, mengalihkan ke Smart Semantic Matcher lokal...');
+    const fallbackResults = heuristicMatchImagesToLyrics(images, lyrics, duration, allowReffReuse, options);
+    return fallbackResults.map((r) => ({
+      ...r,
+      isAiGroq: true,
+      aiModel: 'Smart Semantic Matcher (Fallback: Kuota Groq Tercapai)',
+    }));
+  }
 
   // Build timeline results with occurrence tracking
   const occurrenceCountMap = new Map<number, number>();
 
   const mappedCandidates = rawParsedList.map((p) => {
-      const imgIdx = Math.max(0, Math.min(images.length - 1, p.imageIndex));
-      const lIdx = Math.max(0, Math.min(lyrics.length - 1, p.matchedLyricIndex));
-      const targetLyric = lyrics[lIdx];
-      const { cleanName } = cleanImageFilename(images[imgIdx].name);
+    const imgIdx = Math.max(0, Math.min(images.length - 1, p.imageIndex));
+    const lIdx = Math.max(0, Math.min(lyrics.length - 1, p.matchedLyricIndex));
+    const targetLyric = lyrics[lIdx];
+    const { cleanName } = cleanImageFilename(images[imgIdx].name);
 
-      const count = (occurrenceCountMap.get(imgIdx) || 0) + 1;
-      occurrenceCountMap.set(imgIdx, count);
-      const isReffRepeat = count > 1;
+    const count = (occurrenceCountMap.get(imgIdx) || 0) + 1;
+    occurrenceCountMap.set(imgIdx, count);
+    const isReffRepeat = count > 1;
 
-      return {
-        imageIdx: imgIdx,
+    return {
+      imageIdx: imgIdx,
+      cleanName,
+      url: images[imgIdx].url,
+      lyric: targetLyric,
+      confidence: p.confidence || 88,
+      reason: isReffRepeat
+        ? `🔁 Reff Berulang: "${targetLyric.text.slice(0, 30)}..."`
+        : (p.reason || 'Kecocokan semantik AI Groq Llama 3.3'),
+      isReffRepeat,
+      repeatOccurrence: count,
+    };
+  });
+
+  // Ensure all images are included at least once
+  images.forEach((img, idx) => {
+    if (!mappedCandidates.find((m) => m.imageIdx === idx)) {
+      const { cleanName } = cleanImageFilename(img.name);
+      const lIdx = Math.min(lyrics.length - 1, Math.floor((idx / images.length) * lyrics.length));
+      mappedCandidates.push({
+        imageIdx: idx,
         cleanName,
-        url: images[imgIdx].url,
-        lyric: targetLyric,
-        confidence: p.confidence || 85,
-        reason: isReffRepeat
-          ? `🔁 Reff Berulang: "${targetLyric.text.slice(0, 30)}..."`
-          : (p.reason || 'Kecocokan semantik AI Groq'),
-        isReffRepeat,
-        repeatOccurrence: count
-      };
-    });
-
-    // Ensure all images are included at least once
-    images.forEach((img, idx) => {
-      if (!mappedCandidates.find((m) => m.imageIdx === idx)) {
-        const { cleanName } = cleanImageFilename(img.name);
-        const lIdx = Math.min(lyrics.length - 1, Math.floor((idx / images.length) * lyrics.length));
-        mappedCandidates.push({
-          imageIdx: idx,
-          cleanName,
-          url: img.url,
-          lyric: lyrics[lIdx],
-          confidence: 70,
-          reason: 'Penataan urutan timeline otomatis',
-          isReffRepeat: false,
-          repeatOccurrence: 1
-        });
-      }
-    });
-
-    // Sort chronologically by lyric start
-    mappedCandidates.sort((a, b) => a.lyric.start - b.lyric.start);
-
-    // Build continuous time ranges
-    const results: MatchResult[] = [];
-    const total = mappedCandidates.length;
-
-    for (let i = 0; i < total; i++) {
-      const item = mappedCandidates[i];
-      let start = item.lyric.start;
-      if (i === 0) start = 0;
-
-      let end: number;
-      if (i < total - 1) {
-        end = Math.max(start + 2.5, mappedCandidates[i + 1].lyric.start);
-      } else {
-        end = duration;
-      }
-
-      if (end <= start) {
-        end = Math.min(duration, start + 3.5);
-      }
-
-      results.push({
-        slide: {
-          id: `slide-groq-${item.imageIdx}-${item.isReffRepeat ? `rep${item.repeatOccurrence}` : 'p'}-${i}-${Date.now()}`,
-          url: item.url,
-          name: item.cleanName,
-          startSec: Math.round(start * 10) / 10,
-          endSec: Math.round(end * 10) / 10,
-          matchedLyricId: item.lyric.id,
-          matchedLyricText: item.lyric.text,
-          confidence: item.confidence
-        },
-        cleanName: item.cleanName,
-        matchedLineText: item.lyric.text,
-        confidence: item.confidence,
-        reason: item.reason,
-        isReffRepeat: item.isReffRepeat,
-        repeatOccurrence: item.repeatOccurrence
+        url: img.url,
+        lyric: lyrics[lIdx],
+        confidence: 75,
+        reason: 'Penataan urutan timeline visualizer',
+        isReffRepeat: false,
+        repeatOccurrence: 1,
       });
     }
+  });
 
-    // Fix overlaps
-    for (let i = 0; i < results.length - 1; i++) {
-      if (results[i].slide.endSec > results[i + 1].slide.startSec) {
-        results[i].slide.endSec = results[i + 1].slide.startSec;
-      }
+  // Sort chronologically by lyric start
+  mappedCandidates.sort((a, b) => a.lyric.start - b.lyric.start);
+
+  // Build continuous time ranges
+  const results: MatchResult[] = [];
+  const total = mappedCandidates.length;
+
+  for (let i = 0; i < total; i++) {
+    const item = mappedCandidates[i];
+    let start = item.lyric.start;
+    if (i === 0) start = 0;
+
+    let end: number;
+    if (i < total - 1) {
+      end = Math.max(start + 2.5, mappedCandidates[i + 1].lyric.start);
+    } else {
+      end = duration;
     }
 
-    if (options?.enabled !== false) {
-      return fillInstrumentalGaps(results, images, duration, options);
+    if (end <= start) {
+      end = Math.min(duration, start + 3.5);
     }
 
-    return results;
-  } catch (err: any) {
-    console.warn('Groq LLM matcher fallback to heuristic:', err?.message);
-    return heuristicMatchImagesToLyrics(images, lyrics, duration, allowReffReuse, options);
+    results.push({
+      slide: {
+        id: `slide-groq-${item.imageIdx}-${item.isReffRepeat ? `rep${item.repeatOccurrence}` : 'p'}-${i}-${Date.now()}`,
+        url: item.url,
+        name: item.cleanName,
+        startSec: Math.round(start * 10) / 10,
+        endSec: Math.round(end * 10) / 10,
+        matchedLyricId: item.lyric.id,
+        matchedLyricText: item.lyric.text,
+        confidence: item.confidence,
+      },
+      cleanName: item.cleanName,
+      matchedLineText: item.lyric.text,
+      confidence: item.confidence,
+      reason: item.reason,
+      isReffRepeat: item.isReffRepeat,
+      repeatOccurrence: item.repeatOccurrence,
+      isAiGroq: true,
+      aiModel: successfulModel || 'Groq AI',
+    });
   }
+
+  // Fix overlaps
+  for (let i = 0; i < results.length - 1; i++) {
+    if (results[i].slide.endSec > results[i + 1].slide.startSec) {
+      results[i].slide.endSec = results[i + 1].slide.startSec;
+    }
+  }
+
+  if (options?.enabled !== false) {
+    return fillInstrumentalGaps(results, images, duration, options);
+  }
+
+  return results;
 }

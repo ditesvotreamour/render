@@ -40,6 +40,7 @@ import type {
 import { globalVideoExporter } from '../utils/videoExporter';
 import { GitHubRendererService, type GitHubWorkflowRun } from '../utils/githubRenderer';
 import { isVideoMedia } from '../utils/zipImageExtractor';
+import { AudioTrimmerJoiner } from '../utils/audioTrimmerJoiner';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -153,6 +154,63 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [downloadProgressMsg, setDownloadProgressMsg] = useState<string | null>(null);
   const [idmDownloadingId, setIdmDownloadingId] = useState<number | null>(null);
   const [idmNotification, setIdmNotification] = useState<string | null>(null);
+  const [verifyState, setVerifyState] = useState<{
+    status: 'idle' | 'checking' | 'valid' | 'invalid';
+    message: string;
+  }>({ status: 'idle', message: '' });
+
+  const handleVerifyConnection = async () => {
+    if (!githubRepo.trim() || !githubToken.trim()) {
+      setVerifyState({ status: 'invalid', message: 'Masukkan repository dan token terlebih dahulu.' });
+      return;
+    }
+    setVerifyState({ status: 'checking', message: 'Menghubungi GitHub API...' });
+    try {
+      const cleanRepo = githubRepo.trim().replace(/^https:\/\/github\.com\//, '');
+      const res = await fetch(`https://api.github.com/repos/${cleanRepo}`, {
+        headers: {
+          Authorization: `Bearer ${githubToken.trim()}`,
+          Accept: 'application/vnd.github.v3+json',
+        },
+      });
+      if (res.status === 401) {
+        setVerifyState({
+          status: 'invalid',
+          message: '❌ Bad credentials (401): Token salah atau sudah kadaluarsa. Pastikan token memiliki scope "repo" dan "workflow".',
+        });
+        return;
+      }
+      if (res.status === 404) {
+        setVerifyState({
+          status: 'invalid',
+          message: `❌ Repository "${cleanRepo}" tidak ditemukan atau token tidak memiliki izin baca repo ini.`,
+        });
+        return;
+      }
+      if (!res.ok) {
+        setVerifyState({
+          status: 'invalid',
+          message: `❌ Gagal menghubungi GitHub (HTTP ${res.status}).`,
+        });
+        return;
+      }
+      const data = await res.json();
+      const canPush = data.permissions ? data.permissions.push : true;
+      if (!canPush) {
+        setVerifyState({
+          status: 'invalid',
+          message: `⚠️ Token valid, namun tidak memiliki izin push/write ke repository "${data.full_name}". Pastikan token memiliki scope "repo".`,
+        });
+        return;
+      }
+      setVerifyState({
+        status: 'valid',
+        message: `✅ Terhubung ke ${data.full_name} (${data.private ? 'Private' : 'Public'}) — Izin Akses Valid!`,
+      });
+    } catch (err: any) {
+      setVerifyState({ status: 'invalid', message: `❌ Gagal: ${err.message || err}` });
+    }
+  };
 
   const fetchRuns = React.useCallback(async () => {
     if (!githubRepo || !githubToken) return;
@@ -196,11 +254,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const handleRepoChange = (val: string) => {
     setGithubRepo(val);
     localStorage.setItem('github_render_repo', val);
+    setVerifyState({ status: 'idle', message: '' });
   };
 
   const handleTokenChange = (val: string) => {
     setGithubToken(val);
     localStorage.setItem('github_render_token', val);
+    setVerifyState({ status: 'idle', message: '' });
   };
 
   // 1. Browser Export
@@ -287,13 +347,43 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       // 1. Upload custom audio if blob URL
       let audioPathForWorkflow = currentTrack?.url || 'sample';
       if (currentTrack?.url.startsWith('blob:')) {
-        setGithubStatusMessage('Mengunggah file musik ke repository GitHub...');
         try {
           const res = await fetch(currentTrack.url);
-          const blob = await res.blob();
-          const base64Data = await new Promise<string>((resolve) => {
+          let blob = await res.blob();
+          const origSizeMb = (blob.size / 1024 / 1024).toFixed(1);
+
+          // Auto-compression: If audio is > 10MB or is uncompressed WAV/FLAC, encode to MP3 studio (192kbps)
+          // This reduces a 42.8 MB WAV down to ~5.5 MB, preventing GitHub API Gateway 401 "Bad credentials"
+          const isWavOrFlac =
+            blob.type.includes('wav') ||
+            blob.type.includes('flac') ||
+            (currentTrack?.title || '').toLowerCase().endsWith('.wav') ||
+            (currentTrack?.title || '').toLowerCase().endsWith('.flac');
+
+          if (blob.size > 10 * 1024 * 1024 || isWavOrFlac) {
+            setGithubStatusMessage(`Mengompresi file audio (${origSizeMb} MB) ke format MP3 studio (192kbps)...`);
+            try {
+              blob = await AudioTrimmerJoiner.compressBlobAudio(blob, 192, (pct) => {
+                setGithubStatusMessage(`Mengompresi audio (${origSizeMb} MB) ke MP3 studio (${pct}%)...`);
+              });
+              const newSizeMb = (blob.size / 1024 / 1024).toFixed(1);
+              console.log(`Audio compressed from ${origSizeMb} MB to ${newSizeMb} MB MP3`);
+            } catch (convErr) {
+              console.warn('Audio auto-compression warning:', convErr);
+            }
+          }
+
+          const sizeMb = (blob.size / 1024 / 1024).toFixed(1);
+          setGithubStatusMessage(`Mengunggah file audio (${sizeMb} MB) ke repository GitHub via Git Blobs API...`);
+          
+          if (blob.size > 25 * 1024 * 1024) {
+            throw new Error(`Ukuran file audio (${sizeMb} MB) melebihi batas request GitHub API (25 MB). Silakan gunakan file MP3 yang lebih kecil.`);
+          }
+
+          const base64Data = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onloadend = () => resolve(reader.result as string);
+            reader.onerror = reject;
             reader.readAsDataURL(blob);
           });
           audioPathForWorkflow = await GitHubRendererService.uploadAudioToRepo(
@@ -304,7 +394,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           );
         } catch (e: any) {
           console.warn('Audio upload failed:', e);
-          throw new Error(`Gagal mengunggah audio ke repository GitHub: ${e.message || e}`);
+          const msg = e.message || String(e);
+          if (msg.includes('Bad credentials') || msg.includes('401')) {
+            throw new Error(`Gagal mengunggah audio: GitHub menolak akses (Bad credentials - HTTP 401). Jika file sangat besar, GitHub API menolak request di gateway. Gunakan tombol 'Verifikasi Token & Repo' di tab GitHub Cloud Render untuk memastikan token aktif.`);
+          }
+          throw new Error(`Gagal mengunggah audio ke repository GitHub: ${msg}`);
         }
       }
 
@@ -338,6 +432,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         if (isVid) {
           const res = await fetch(blobUrl);
           const blob = await res.blob();
+          const sizeMb = (blob.size / 1024 / 1024).toFixed(1);
+          if (blob.size > 25 * 1024 * 1024) {
+            throw new Error(`Ukuran video background (${sizeMb} MB) melebihi batas request GitHub API (25 MB). Silakan gunakan klip video yang berukuran lebih ringkas.`);
+          }
+          setGithubStatusMessage(`Mengunggah video background (${sizeMb} MB)...`);
           const base64 = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onloadend = () => resolve(reader.result as string);
@@ -427,32 +526,32 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           }
           preparedBg.multiImageSlides = updatedSlides;
         }
+      }
 
-        // Upload bRoll clips if present
-        if (preparedBg.bRoll && Array.isArray(preparedBg.bRoll.clips) && preparedBg.bRoll.clips.length > 0) {
-          const updatedBClips: BRollClip[] = [];
-          const bTotal = preparedBg.bRoll.clips.length;
-          for (let i = 0; i < bTotal; i++) {
-            const bClip = preparedBg.bRoll.clips[i];
-            const isVid = isVideoMedia(bClip?.url || '', bClip?.mediaType);
-            const mediaType: 'image' | 'video' = isVid ? 'video' : 'image';
-            if (bClip && bClip.url && bClip.url.startsWith('blob:')) {
-              setGithubStatusMessage(
-                `Mengunggah ${isVid ? 'video' : 'gambar'} B-roll (${i + 1}/${bTotal}) ke GitHub...`
-              );
-              try {
-                const bPath = await getOrUploadImage(bClip.url, `broll_${isVid ? 'video' : 'clip'}_${i + 1}`, mediaType);
-                updatedBClips.push({ ...bClip, url: bPath, mediaType });
-              } catch (e: any) {
-                console.warn(`B-Roll clip ${i + 1} upload failed:`, e);
-                updatedBClips.push({ ...bClip, mediaType });
-              }
-            } else {
+      // Upload bRoll clips if present (applicable for any background type: custom_image, multi_image, preset, etc.)
+      if (preparedBg.bRoll && Array.isArray(preparedBg.bRoll.clips) && preparedBg.bRoll.clips.length > 0) {
+        const updatedBClips: BRollClip[] = [];
+        const bTotal = preparedBg.bRoll.clips.length;
+        for (let i = 0; i < bTotal; i++) {
+          const bClip = preparedBg.bRoll.clips[i];
+          const isVid = isVideoMedia(bClip?.url || '', bClip?.mediaType);
+          const mediaType: 'image' | 'video' = isVid ? 'video' : 'image';
+          if (bClip && bClip.url && bClip.url.startsWith('blob:')) {
+            setGithubStatusMessage(
+              `Mengunggah ${isVid ? 'video' : 'gambar'} B-roll (${i + 1}/${bTotal}) ke GitHub...`
+            );
+            try {
+              const bPath = await getOrUploadImage(bClip.url, `broll_${isVid ? 'video' : 'clip'}_${i + 1}`, mediaType);
+              updatedBClips.push({ ...bClip, url: bPath, mediaType });
+            } catch (e: any) {
+              console.warn(`B-Roll clip ${i + 1} upload failed:`, e);
               updatedBClips.push({ ...bClip, mediaType });
             }
+          } else {
+            updatedBClips.push({ ...bClip, mediaType });
           }
-          preparedBg.bRoll.clips = updatedBClips;
         }
+        preparedBg.bRoll.clips = updatedBClips;
       }
 
       const mergedOptions: RenderExportOptions = {
@@ -1212,6 +1311,49 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                       placeholder="ghp_..."
                       className="w-full px-3 py-2 bg-black/50 border border-white/15 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-400 font-mono"
                     />
+                  </div>
+
+                  {/* Token Verification & Cloud Info */}
+                  <div className="pt-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={handleVerifyConnection}
+                        disabled={verifyState.status === 'checking'}
+                        className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] text-slate-300 hover:text-white flex items-center gap-1.5 transition-all"
+                      >
+                        {verifyState.status === 'checking' ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-400" />
+                        ) : (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                        )}
+                        <span>Verifikasi Akses Token</span>
+                      </button>
+                      <span className="text-[10px] text-slate-400">
+                        ⚡ Audio 40MB+ dikompresi otomatis ke MP3
+                      </span>
+                    </div>
+
+                    {verifyState.message && (
+                      <div
+                        className={`mt-2 p-2.5 rounded-xl text-[11px] flex items-start gap-2 ${
+                          verifyState.status === 'valid'
+                            ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+                            : verifyState.status === 'checking'
+                            ? 'bg-cyan-500/10 border border-cyan-500/30 text-cyan-300'
+                            : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'
+                        }`}
+                      >
+                        {verifyState.status === 'valid' ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                        ) : verifyState.status === 'checking' ? (
+                          <Loader2 className="w-4 h-4 text-cyan-400 animate-spin shrink-0 mt-0.5" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                        )}
+                        <span>{verifyState.message}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 

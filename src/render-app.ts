@@ -152,27 +152,45 @@ window.__INIT_RENDER__ = async (config: any, audioBase64: string) => {
     }
     await Promise.all(imagePreloads);
 
-    // Preload typography and subtitle Google Fonts before starting frame capture
+    // Preload typography and subtitle Google & Local Fonts before starting frame capture
     const fontPreloads = [
-      'bold 46px "Playfair Display"',
-      'italic bold 46px "Playfair Display"',
-      'bold 46px "Anton"',
-      'bold 46px "Bebas Neue"',
+      // 400 / Normal weights (vital for Anton, Bebas Neue, Impact, Black Ops, Special Elite)
+      '400 46px "Anton"',
+      'normal 46px "Anton"',
+      '400 46px "Bebas Neue"',
+      'normal 46px "Bebas Neue"',
+      '400 46px "Impact"',
+      'normal 46px "Impact"',
+      '400 46px "Black Ops One"',
+      '400 46px "Special Elite"',
+      '400 46px "Inter"',
+      // 700 / 800 / 900 Bold weights
+      '700 46px "Impact"',
+      'bold 46px "Impact"',
+      'bold 46px "Montserrat"',
+      '800 46px "Montserrat"',
+      '900 46px "Montserrat"',
+      'bold 46px "Inter"',
+      '800 46px "Inter"',
+      'bold 46px "Kanit"',
+      '800 46px "Kanit"',
+      '900 46px "Kanit"',
+      'bold 46px "Rubik"',
+      '800 46px "Rubik"',
+      '900 46px "Rubik"',
+      'bold 46px "Poppins"',
+      '800 46px "Poppins"',
+      'bold 46px "Orbitron"',
+      '800 46px "Orbitron"',
+      'bold 46px "Cinzel"',
+      '900 46px "Cinzel"',
+      'bold 46px "Syne"',
+      '800 46px "Syne"',
+      'bold 46px "Syncopate"',
       'bold 46px "Courier Prime"',
       'italic bold 46px "Courier Prime"',
-      'bold 46px "Special Elite"',
-      'bold 46px "Montserrat"',
-      'bold 46px "Kanit"',
-      'italic bold 46px "Kanit"',
-      'bold 46px "Rubik"',
-      'bold 46px "Impact"',
-      'bold 46px "Inter"',
-      'bold 46px "Cinzel"',
-      'bold 46px "Black Ops One"',
-      'bold 46px "Orbitron"',
-      'bold 46px "Poppins"',
-      'bold 46px "Syne"',
-      'bold 46px "Syncopate"',
+      'bold 46px "Playfair Display"',
+      'italic bold 46px "Playfair Display"',
     ];
     if (document.fonts && document.fonts.load) {
       await Promise.allSettled(fontPreloads.map((f) => document.fonts.load(f)));
@@ -180,6 +198,13 @@ window.__INIT_RENDER__ = async (config: any, audioBase64: string) => {
     if (document.fonts && document.fonts.ready) {
       await document.fonts.ready;
     }
+
+    // Warm up canvas 2D font cache with active subtitle font
+    const activeFont = subtitleConfig?.fontFamily || 'Montserrat';
+    const isHeavy = activeFont === 'Anton' || activeFont === 'Impact' || activeFont === 'Bebas Neue';
+    const testWeight = isHeavy ? 'normal' : 'bold';
+    ctx.font = `${testWeight} 46px "${activeFont}", "Anton", sans-serif`;
+    ctx.measureText('THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG');
 
     window.__RENDER_READY__ = true;
     return true;

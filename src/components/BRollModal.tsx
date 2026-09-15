@@ -18,6 +18,7 @@ import {
   RotateCcw,
   CheckCircle2,
   Key,
+  Zap,
 } from 'lucide-react';
 import type {
   BackgroundConfig,
@@ -26,7 +27,9 @@ import type {
   BRollDisplayMode,
   BRollPipPosition,
   LyricSegment,
+  VisualEffectType,
 } from '../types/visualizer';
+import { VISUAL_EFFECT_OPTIONS } from '../types/visualizer';
 import { BROLL_PRESETS, createBRollClipFromPreset, type BRollPresetItem } from '../data/bRollPresets';
 import { registerMediaUrl } from '../utils/zipImageExtractor';
 import { StockMediaBrowser } from './StockMediaBrowser';
@@ -575,6 +578,15 @@ export const BRollModal: React.FC<BRollModalProps> = ({
                                   ? 'Blend'
                                   : 'Cutaway'}
                               </span>
+                              {clip.visualEffect && clip.visualEffect !== 'none' && (
+                                <>
+                                  <span>•</span>
+                                  <span className="flex items-center gap-0.5 px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 font-sans text-[9px] border border-amber-500/30">
+                                    <Zap className="w-2.5 h-2.5" />
+                                    {VISUAL_EFFECT_OPTIONS.find((o) => o.id === clip.visualEffect)?.shortLabel || clip.visualEffect}
+                                  </span>
+                                </>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -890,6 +902,72 @@ export const BRollModal: React.FC<BRollModalProps> = ({
                         </label>
                       </div>
                     </div>
+
+                    {/* 5. EFEK KAMERA VISUAL */}
+                    <div className="space-y-2 pt-2 border-t border-white/5">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                          <Zap className="w-3.5 h-3.5 text-amber-400" />
+                          Efek Kamera Visual B-Roll
+                        </label>
+                        {selectedClip.visualEffect && selectedClip.visualEffect !== 'none' && (
+                          <span className="text-[10px] text-amber-400 font-medium">
+                            Intensitas: {Math.round((selectedClip.visualEffectIntensity ?? 1) * 100)}%
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {VISUAL_EFFECT_OPTIONS.map((opt) => {
+                          const isSelected = (selectedClip.visualEffect || 'none') === opt.id;
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() =>
+                                handleUpdateClip(selectedClip.id, {
+                                  visualEffect: opt.id as VisualEffectType,
+                                  visualEffectIntensity: selectedClip.visualEffectIntensity ?? 1,
+                                })
+                              }
+                              className={`p-2 rounded-xl text-left border transition-all text-xs flex flex-col gap-0.5 ${
+                                isSelected
+                                  ? 'bg-amber-500/20 border-amber-500/50 text-amber-200'
+                                  : 'bg-white/5 border-white/5 text-slate-400 hover:bg-white/10 hover:text-slate-200'
+                              }`}
+                            >
+                              <span className="font-semibold text-[11px] truncate flex items-center gap-1">
+                                <span>{opt.icon}</span>
+                                <span>{opt.shortLabel}</span>
+                              </span>
+                              <span className="text-[9px] opacity-70 line-clamp-1">{opt.desc}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {selectedClip.visualEffect && selectedClip.visualEffect !== 'none' && (
+                        <div className="flex items-center gap-3 pt-1">
+                          <span className="text-[11px] text-slate-400">Intensitas Efek:</span>
+                          <input
+                            type="range"
+                            min="0.1"
+                            max="1"
+                            step="0.05"
+                            value={selectedClip.visualEffectIntensity ?? 1}
+                            onChange={(e) =>
+                              handleUpdateClip(selectedClip.id, {
+                                visualEffectIntensity: parseFloat(e.target.value),
+                              })
+                            }
+                            className="flex-1 h-1 bg-slate-700 rounded appearance-none cursor-pointer accent-amber-500"
+                          />
+                          <span className="font-mono text-white text-[11px] w-10 text-right">
+                            {Math.round((selectedClip.visualEffectIntensity ?? 1) * 100)}%
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   </>
                 ) : (
                   <div className="h-full flex flex-col items-center justify-center text-center text-slate-500 p-8 gap-2">
@@ -1087,32 +1165,39 @@ export const BRollModal: React.FC<BRollModalProps> = ({
                             className="w-4 h-4 rounded text-violet-600 focus:ring-violet-500 bg-slate-900 border-slate-700"
                           />
                           <span className="text-xs font-semibold text-slate-200">
-                            Gunakan Deep Reasoning AI (Groq Llama 3.3 Versatile)
+                            Gunakan Deep Reasoning AI (Groq Llama 3.3 Versatile / Llama 3.1)
                           </span>
                         </label>
                         <span className="text-[10px] text-slate-400">Opsional</span>
                       </div>
 
                       {useGroqLlM && (
-                        <div className="flex items-center gap-2">
-                          <div className="relative flex-1">
-                            <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-amber-400" />
-                            <input
-                              type="password"
-                              value={groqKeyInput}
-                              onChange={(e) => setGroqKeyInput(e.target.value)}
-                              placeholder="Masukkan Groq API Key..."
-                              className="w-full pl-8 pr-3 py-1.5 bg-slate-950 border border-white/10 rounded-xl text-xs text-white font-mono outline-none focus:border-violet-500"
-                            />
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <div className="relative flex-1">
+                              <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-amber-400" />
+                              <input
+                                type="password"
+                                value={groqKeyInput}
+                                onChange={(e) => setGroqKeyInput(e.target.value)}
+                                placeholder="Masukkan Groq API Key (gsk_...)"
+                                className="w-full pl-8 pr-3 py-1.5 bg-slate-950 border border-white/10 rounded-xl text-xs text-white font-mono outline-none focus:border-violet-500"
+                              />
+                            </div>
+                            <a
+                              href="https://console.groq.com/keys"
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-[11px] text-amber-400 hover:text-amber-300 underline shrink-0"
+                            >
+                              Dapatkan Kunci Gratis
+                            </a>
                           </div>
-                          <a
-                            href="https://console.groq.com/keys"
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-[11px] text-amber-400 hover:text-amber-300 underline shrink-0"
-                          >
-                            Dapatkan Kunci Gratis
-                          </a>
+                          {groqKeyInput.trim().startsWith('sk-') && !groqKeyInput.trim().startsWith('gsk_') && (
+                            <p className="text-[10px] text-amber-300">
+                              ℹ️ Kunci diawali &quot;sk-&quot; (KoboiLLM hanya untuk Whisper STT). Untuk Deep Reasoning LLM, gunakan API Key dari console.groq.com (gsk_...).
+                            </p>
+                          )}
                         </div>
                       )}
                     </div>
