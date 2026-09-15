@@ -945,7 +945,7 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
                 <input
                   type="range"
                   min="-6"
-                  max="40"
+                  max="10"
                   step="1"
                   value={config.wordSpacing ?? 0}
                   onChange={(e) => update({ wordSpacing: parseInt(e.target.value) })}
@@ -958,9 +958,9 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
                     onClick={() => update({ wordSpacing: 0 })}
                     className="text-cyan-400 hover:underline cursor-pointer"
                   >
-                    Reset Auto
+                    Reset Auto (Optimal)
                   </button>
-                  <span>Lebar (+40px)</span>
+                  <span>Renggang (+10px)</span>
                 </div>
               </div>
             </div>
