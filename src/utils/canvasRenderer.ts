@@ -3686,35 +3686,38 @@ export class CanvasRenderer {
     // --- SCREEN OVERFLOW PROTECTION: Smart Multi-line Text Wrapping ---
     const maxAllowedWidth = width * (sub.autoWrapWidth ? sub.autoWrapWidth / 100 : 0.84);
     
-    // Dynamic Word Spacing: In condensed fonts like Anton/Impact, ' ' advance is notoriously tiny (~0.15-0.20 * fontSize).
-    // We enforce a healthy, tight baseline so words don't crash, but NEVER spread too far apart.
+    // Dynamic Word Spacing: Enforce clean, readable baseline so words NEVER crash or overlap,
+    // while keeping spacing natural and preventing excessive gaps.
     const rawSpaceW = ctx.measureText(' ').width;
     const isCondensedFont =
       fontFamily === 'Anton' ||
       fontFamily === 'Impact' ||
       fontFamily === 'Bebas Neue';
-    // Minimum comfortable word space based on font size:
-    const targetSpaceRatio = isCondensedFont ? 0.19 : 0.21;
-    let baseSpace = Math.max(rawSpaceW, Math.round(fontSize * targetSpaceRatio));
-    if (isCondensedFont) {
-      baseSpace = Math.min(baseSpace, Math.round(fontSize * 0.24));
-    } else {
-      baseSpace = Math.min(baseSpace, Math.round(fontSize * 0.28));
-    }
-    // Stroke padding allowance: only if outline is heavier than normal (> 4px)
+    // Baseline comfortable word space: ~0.25 em for condensed (~11px @ 44px), ~0.28 em for standard (~12px @ 44px)
+    const targetSpaceRatio = isCondensedFont ? 0.25 : 0.28;
+    const baseSpace = Math.max(rawSpaceW, Math.round(fontSize * targetSpaceRatio));
+
+    // Stroke padding allowance: when outline is heavy, extra margin prevents adjacent strokes from colliding
     const strokeWidth = sub.strokeWidth ?? 4;
-    const strokeMargin = strokeWidth > 4 ? Math.min(3, Math.round((strokeWidth - 4) * 0.2)) : 0;
-    // Pop bounce buffer for kinetic styles so enlarged active word doesn't collide with neighbors
-    const kineticBuffer = isHormozi ? Math.min(2, Math.max(1, Math.round(fontSize * 0.02))) : 0;
-    const extraStyleSpace = isRansom ? Math.min(10, Math.round(fontSize * 0.12)) : isBrutalism ? Math.min(5, Math.round(fontSize * 0.06)) : 0;
-    
-    // User manual adjustment from slider, safely clamped so it never causes huge gaps:
-    const rawUserSpacing = typeof sub.wordSpacing === 'number' ? sub.wordSpacing : 0;
-    const userSpacing = Math.max(-6, Math.min(8, rawUserSpacing));
-    
-    // Hard clamp spaceW: condensed fonts max ~0.26 em (~11px @ 44px), standard fonts max ~0.32 em (~14px @ 44px)
-    const maxAllowedSpace = isCondensedFont ? Math.round(fontSize * 0.26) : Math.round(fontSize * 0.32);
-    const spaceW = Math.max(6, Math.min(maxAllowedSpace, Math.round(baseSpace + strokeMargin + kineticBuffer + extraStyleSpace + userSpacing)));
+    const strokeMargin = strokeWidth > 3 ? Math.round((strokeWidth - 3) * 0.45) : 0;
+
+    // Kinetic buffer: active enlarged words (pop/bounce) need breathing room so they don't cover neighbors
+    const hasPopAnim =
+      isHormozi ||
+      sub.highlightAnimation === 'bounce_pop' ||
+      sub.highlightAnimation === 'beat_bounce_pop' ||
+      sub.highlightAnimation === 'rubber_band' ||
+      sub.highlightAnimation === 'box_sticker';
+    const kineticBuffer = hasPopAnim ? Math.max(3, Math.round(fontSize * 0.06)) : 0;
+    const extraStyleSpace = isRansom ? Math.max(4, Math.round(fontSize * 0.14)) : isBrutalism ? Math.max(2, Math.round(fontSize * 0.07)) : 0;
+
+    // User manual adjustment from slider (-8 to +14)
+    const userSpacing = typeof sub.wordSpacing === 'number' ? sub.wordSpacing : 0;
+
+    // Compute spaceW with safe minimum (so words never touch or overlap) and maximum ceiling (so it never blows up)
+    const minSafeSpace = Math.max(10, Math.round(fontSize * 0.22) + strokeMargin);
+    const maxSafeSpace = Math.max(24, Math.round(fontSize * 0.55));
+    const spaceW = Math.max(minSafeSpace, Math.min(maxSafeSpace, Math.round(baseSpace + strokeMargin + kineticBuffer + extraStyleSpace + userSpacing)));
 
     // Prepare Word Data: ensure words array ALWAYS matches the latest edited text and words are trimmed!
     let words = activeSeg.words;
