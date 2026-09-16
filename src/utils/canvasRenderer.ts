@@ -3693,30 +3693,32 @@ export class CanvasRenderer {
       fontFamily === 'Anton' ||
       fontFamily === 'Impact' ||
       fontFamily === 'Bebas Neue';
-    // Baseline comfortable word space: ~0.25 em for condensed (~11px @ 44px), ~0.28 em for standard (~12px @ 44px)
-    const targetSpaceRatio = isCondensedFont ? 0.25 : 0.28;
-    const baseSpace = Math.max(rawSpaceW, Math.round(fontSize * targetSpaceRatio));
+
+    // Baseline comfortable word space in subtitle typography:
+    // Condensed fonts ~0.35 em (~16px @ 44px), Standard fonts ~0.42 em (~19px @ 44px)
+    const targetSpaceRatio = isCondensedFont ? 0.35 : 0.42;
+    const baseSpace = Math.max(Math.round(rawSpaceW * 1.15), Math.round(fontSize * targetSpaceRatio));
 
     // Stroke padding allowance: when outline is heavy, extra margin prevents adjacent strokes from colliding
     const strokeWidth = sub.strokeWidth ?? 4;
-    const strokeMargin = strokeWidth > 3 ? Math.round((strokeWidth - 3) * 0.45) : 0;
+    const strokeMargin = Math.max(3, Math.round(strokeWidth * 0.75));
 
-    // Kinetic buffer: active enlarged words (pop/bounce) need breathing room so they don't cover neighbors
+    // Kinetic breathing buffer: active enlarged words need breathing room
     const hasPopAnim =
       isHormozi ||
       sub.highlightAnimation === 'bounce_pop' ||
       sub.highlightAnimation === 'beat_bounce_pop' ||
       sub.highlightAnimation === 'rubber_band' ||
       sub.highlightAnimation === 'box_sticker';
-    const kineticBuffer = hasPopAnim ? Math.max(3, Math.round(fontSize * 0.06)) : 0;
-    const extraStyleSpace = isRansom ? Math.max(4, Math.round(fontSize * 0.14)) : isBrutalism ? Math.max(2, Math.round(fontSize * 0.07)) : 0;
+    const kineticBuffer = hasPopAnim ? Math.max(4, Math.round(fontSize * 0.08)) : 0;
+    const extraStyleSpace = isRansom ? Math.max(8, Math.round(fontSize * 0.20)) : isBrutalism ? Math.max(5, Math.round(fontSize * 0.10)) : 0;
 
-    // User manual adjustment from slider (-8 to +14)
+    // User manual adjustment from slider (-12 to +28)
     const userSpacing = typeof sub.wordSpacing === 'number' ? sub.wordSpacing : 0;
 
-    // Compute spaceW with safe minimum (so words never touch or overlap) and maximum ceiling (so it never blows up)
-    const minSafeSpace = Math.max(10, Math.round(fontSize * 0.22) + strokeMargin);
-    const maxSafeSpace = Math.max(24, Math.round(fontSize * 0.55));
+    // Compute spaceW with safe minimum (so words never touch or overlap) and safe maximum ceiling
+    const minSafeSpace = Math.max(16, Math.round(fontSize * 0.30) + strokeMargin);
+    const maxSafeSpace = Math.max(45, Math.round(fontSize * 0.90));
     const spaceW = Math.max(minSafeSpace, Math.min(maxSafeSpace, Math.round(baseSpace + strokeMargin + kineticBuffer + extraStyleSpace + userSpacing)));
 
     // Prepare Word Data: ensure words array ALWAYS matches the latest edited text and words are trimmed!
@@ -3895,13 +3897,43 @@ export class CanvasRenderer {
           ctx.translate(-posX, -lineY);
         }
 
-        let curX = posX - line.width / 2;
+        // Pre-compute collision-free layout geometry for every word in this line:
+        const strokeMargin = Math.max(3, Math.round((sub.strokeWidth ?? 4) * 0.75));
+        const wordGeom = line.words.map((w: any) => {
+          const isActive = t >= w.start && t <= w.end;
+          const baseW = isRansom ? Math.max(w.width || 0, ctx.measureText(w.displayWord).width) : w.width;
+          const activeScale = isActive ? 1.25 : 1.0;
+          const pillExtra = isRansom ? Math.max(14, Math.round(fontSize * 0.26)) : isBrutalism ? Math.max(8, Math.round(fontSize * 0.18)) : 0;
+          const halfVisualW = (baseW * activeScale) / 2 + strokeMargin + pillExtra;
+          return {
+            w,
+            baseW,
+            halfVisualW,
+          };
+        });
 
-        for (const w of line.words) {
+        // Compute centers ensuring adjacent visual boundaries are separated by at least spaceW:
+        const wordCenters: number[] = [];
+        let cumX = 0;
+        for (let i = 0; i < wordGeom.length; i++) {
+          if (i === 0) {
+            cumX = wordGeom[0].halfVisualW;
+          } else {
+            cumX += wordGeom[i - 1].halfVisualW + spaceW + wordGeom[i].halfVisualW;
+          }
+          wordCenters.push(cumX);
+        }
+        const totalVisualLineW = wordGeom.length > 0 ? (cumX + wordGeom[wordGeom.length - 1].halfVisualW) : 0;
+        const lineStartX = posX - totalVisualLineW / 2;
+
+        for (let i = 0; i < line.words.length; i++) {
+          const w = line.words[i];
+          const geom = wordGeom[i];
+          const wcx = lineStartX + wordCenters[i];
+          const curX = wcx - geom.baseW / 2;
           const wp = Math.max(0, Math.min(1, (t - w.start) / Math.max(0.05, w.end - w.start)));
           const isSung = t > w.end;
           const isActive = t >= w.start && t <= w.end;
-          const wcx = curX + w.width / 2;
 
           const cleanWord = w.word.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
           const isPowerWord =
@@ -4085,9 +4117,9 @@ export class CanvasRenderer {
             // 1. Kinetic Transform
             if (anim === 'beat_bounce_pop' || isTextBouncePop) {
               // Text Bounce / Text Pop: Membesar & mengecil cepat mengikuti ketukan bass musik
-              const bassKick = Math.pow(bass, 1.35) * 0.48;
-              const elasticWp = Math.sin(wp * Math.PI) * 0.22;
-              const popScale = Math.min(1.72, (1.14 + elasticWp + bassKick) * powerBoost);
+              const bassKick = Math.pow(bass, 1.35) * 0.16;
+              const elasticWp = Math.sin(wp * Math.PI) * 0.12;
+              const popScale = Math.min(1.28, (1.08 + elasticWp + bassKick) * powerBoost);
               const tilt = (Math.sin(t * 14 + (w.displayWord.length % 3)) * 0.04) * (bass > 0.4 ? 1.4 : 0.7);
               ctx.translate(wcx, lineY);
               ctx.rotate(tilt);
@@ -4353,8 +4385,6 @@ export class CanvasRenderer {
           }
 
           ctx.restore();
-          const wordStepW = isRansom ? Math.max(w.width || 0, ctx.measureText(w.displayWord).width) : w.width;
-          curX += wordStepW + spaceW;
         }
 
         ctx.restore();

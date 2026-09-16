@@ -944,15 +944,15 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
                 </div>
                 <input
                   type="range"
-                  min="-8"
-                  max="14"
+                  min="-12"
+                  max="28"
                   step="1"
                   value={config.wordSpacing ?? 0}
                   onChange={(e) => update({ wordSpacing: parseInt(e.target.value) })}
                   className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400"
                 />
                 <div className="flex justify-between text-[9px] text-slate-500 mt-1">
-                  <span>Rapat (-8px)</span>
+                  <span>Rapat (-12px)</span>
                   <button
                     type="button"
                     onClick={() => update({ wordSpacing: 0 })}
@@ -960,7 +960,7 @@ export const LyricsTab: React.FC<LyricsTabProps> = ({
                   >
                     Reset Auto (Optimal)
                   </button>
-                  <span>Renggang (+14px)</span>
+                  <span>Renggang (+28px)</span>
                 </div>
               </div>
             </div>
