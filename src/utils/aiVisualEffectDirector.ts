@@ -10,6 +10,7 @@
 
 import type { LyricSegment, SlideItem, VisualEffectType } from '../types/visualizer';
 import { VISUAL_EFFECT_OPTIONS } from '../types/visualizer';
+import { KOBOILLM_CHAT_ENDPOINT, normalizeKoboiEndpoint } from './koboiLLMService';
 
 export type VisualEffectStylePreset =
   | 'cinematic_smart' // Balanced mix of distortion at drops, vintage on emotional parts, worms at intro/transitions
@@ -361,7 +362,7 @@ Provide the recommended camera effect assignments in valid JSON.`;
 
   const isKoboi = cleanKey.startsWith('sk-') && !cleanKey.startsWith('gsk_');
   const endpoint = isKoboi
-    ? 'https://api.koboillm.com/v1/chat/completions'
+    ? normalizeKoboiEndpoint(KOBOILLM_CHAT_ENDPOINT)
     : 'https://api.groq.com/openai/v1/chat/completions';
 
   const requestedModel = options.model || (isKoboi ? 'gpt-4o-mini' : 'llama-3.3-70b-versatile');

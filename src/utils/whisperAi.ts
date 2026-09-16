@@ -1,11 +1,14 @@
 import type { LyricSegment, LyricWord } from '../types/visualizer';
+import { KOBOILLM_AUDIO_ENDPOINT, normalizeKoboiEndpoint } from './koboiLLMService';
 
 export type WhisperSTTProvider = 'groq' | 'openai' | 'koboillm' | 'custom';
 
 export class WhisperAIService {
   public static readonly GROQ_API_ENDPOINT = 'https://api.groq.com/openai/v1/audio/transcriptions';
   public static readonly OPENAI_API_ENDPOINT = 'https://api.openai.com/v1/audio/transcriptions';
-  public static readonly KOBOILLM_API_ENDPOINT = 'https://api.koboillm.com/v1/audio/transcriptions';
+  public static get KOBOILLM_API_ENDPOINT(): string {
+    return KOBOILLM_AUDIO_ENDPOINT;
+  }
   public static readonly DEFAULT_MODEL = 'whisper-large-v3-turbo';
   public static readonly DEFAULT_GROQ_MODEL = 'whisper-large-v3-turbo';
   public static readonly DEFAULT_OPENAI_MODEL = 'whisper-1';
@@ -265,7 +268,8 @@ export class WhisperAIService {
       );
     }
 
-    const endpoint = (options.endpoint || '').trim() || this.OPENAI_API_ENDPOINT;
+    const rawEndpoint = (options.endpoint || '').trim() || this.OPENAI_API_ENDPOINT;
+    const endpoint = normalizeKoboiEndpoint(rawEndpoint);
     const isKoboiLLM = endpoint.includes('koboillm');
     let model = options.model || (isKoboiLLM ? 'openai/whisper-1' : this.DEFAULT_OPENAI_MODEL);
     if (isKoboiLLM && model === 'whisper-1') {
@@ -407,7 +411,7 @@ export class WhisperAIService {
     } = {},
     onStatus?: (status: string) => void
   ): Promise<LyricSegment[]> {
-    const cleanEndpoint = (endpointUrl || '').trim();
+    const cleanEndpoint = normalizeKoboiEndpoint((endpointUrl || '').trim());
     if (!cleanEndpoint) {
       throw new Error('Endpoint URL Whisper server lokal/custom belum diisi.');
     }

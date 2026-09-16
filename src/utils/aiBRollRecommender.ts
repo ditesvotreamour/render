@@ -9,6 +9,7 @@
 import type { LyricSegment, BRollDisplayMode, BRollPipPosition, BRollClip } from '../types/visualizer';
 import { searchUnifiedStockMedia, type StockMediaItem } from './stockMediaService';
 import { registerMediaUrl } from './zipImageExtractor';
+import { KOBOILLM_CHAT_ENDPOINT, normalizeKoboiEndpoint } from './koboiLLMService';
 
 export interface BRollRecommendation {
   id: string;
@@ -321,7 +322,7 @@ Return ONLY a valid JSON object matching this schema:
   const cleanKey = apiKey.trim();
   const isKoboi = cleanKey.startsWith('sk-') && !cleanKey.startsWith('gsk_');
   const endpoint = isKoboi
-    ? 'https://api.koboillm.com/v1/chat/completions'
+    ? normalizeKoboiEndpoint(KOBOILLM_CHAT_ENDPOINT)
     : 'https://api.groq.com/openai/v1/chat/completions';
 
   const modelsToTry = isKoboi

@@ -12,7 +12,22 @@ export interface KoboiModelItem {
   type?: 'audio' | 'chat' | 'reasoning' | 'general';
 }
 
-export const KOBOILLM_BASE_URL = 'https://api.koboillm.com/v1';
+export const KOBOILLM_DIRECT_BASE_URL = 'https://api.koboillm.com/v1';
+
+/**
+ * Normalizes any KoboiLLM endpoint URL so that in browser environments,
+ * it routes through the local Vite proxy (/api-koboillm/...) to eliminate CORS blocks.
+ */
+export function normalizeKoboiEndpoint(url: string): string {
+  if (!url) return url;
+  if (typeof window !== 'undefined' && url.includes('api.koboillm.com')) {
+    return url.replace(/^https?:\/\/api\.koboillm\.com/, '/api-koboillm');
+  }
+  return url;
+}
+
+export const KOBOILLM_BASE_URL =
+  typeof window !== 'undefined' ? '/api-koboillm/v1' : KOBOILLM_DIRECT_BASE_URL;
 export const KOBOILLM_MODELS_ENDPOINT = `${KOBOILLM_BASE_URL}/models`;
 export const KOBOILLM_CHAT_ENDPOINT = `${KOBOILLM_BASE_URL}/chat/completions`;
 export const KOBOILLM_AUDIO_ENDPOINT = `${KOBOILLM_BASE_URL}/audio/transcriptions`;
@@ -30,9 +45,10 @@ export async function fetchKoboiLLMModels(apiKey: string): Promise<KoboiModelIte
     throw new Error('API Key KoboiLLM diperlukan untuk memuat daftar model dari https://api.koboillm.com/v1/models.');
   }
 
+  const endpoint = normalizeKoboiEndpoint(KOBOILLM_MODELS_ENDPOINT);
   let response: Response;
   try {
-    response = await fetch(KOBOILLM_MODELS_ENDPOINT, {
+    response = await fetch(endpoint, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${cleanKey}`,
@@ -40,7 +56,7 @@ export async function fetchKoboiLLMModels(apiKey: string): Promise<KoboiModelIte
       },
     });
   } catch (err: any) {
-    throw new Error(`Gagal menghubungi KoboiLLM (${KOBOILLM_MODELS_ENDPOINT}): ${err.message || 'CORS / Network Error'}`);
+    throw new Error(`Gagal menghubungi KoboiLLM (${endpoint}): ${err.message || 'CORS / Network Error'}`);
   }
 
   if (!response.ok) {
@@ -137,9 +153,10 @@ export async function createKoboiChatCompletion(
 
   const model = params.model || localStorage.getItem('koboillm_chat_model') || DEFAULT_KOBOILLM_CHAT_MODEL;
 
+  const endpoint = normalizeKoboiEndpoint(KOBOILLM_CHAT_ENDPOINT);
   let response: Response;
   try {
-    response = await fetch(KOBOILLM_CHAT_ENDPOINT, {
+    response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -154,7 +171,7 @@ export async function createKoboiChatCompletion(
       }),
     });
   } catch (err: any) {
-    throw new Error(`Gagal terhubung ke LiteLLM KoboiLLM (${KOBOILLM_CHAT_ENDPOINT}): ${err.message || 'CORS / Network Error'}`);
+    throw new Error(`Gagal terhubung ke LiteLLM KoboiLLM (${endpoint}): ${err.message || 'CORS / Network Error'}`);
   }
 
   if (!response.ok) {

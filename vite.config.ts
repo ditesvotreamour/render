@@ -245,9 +245,49 @@ function githubDownloadProxyPlugin(): Plugin {
   };
 }
 
+function koboillmProxyPlugin(): Plugin {
+  return {
+    name: 'koboillm-proxy-plugin',
+    configureServer(server) {
+      // Preflight handler to guarantee any browser OPTIONS check receives 204 with CORS headers
+      server.middlewares.use('/api-koboillm', (req, res, next) => {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', '*');
+        if (req.method === 'OPTIONS') {
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
+        next();
+      });
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), githubDownloadProxyPlugin()],
+  plugins: [react(), githubDownloadProxyPlugin(), koboillmProxyPlugin()],
+  server: {
+    proxy: {
+      '/api-koboillm': {
+        target: 'https://api.koboillm.com',
+        changeOrigin: true,
+        secure: true,
+        rewrite: (path) => path.replace(/^\/api-koboillm/, ''),
+      },
+    },
+  },
+  preview: {
+    proxy: {
+      '/api-koboillm': {
+        target: 'https://api.koboillm.com',
+        changeOrigin: true,
+        secure: true,
+        rewrite: (path) => path.replace(/^\/api-koboillm/, ''),
+      },
+    },
+  },
   build: {
     rollupOptions: {
       input: {
