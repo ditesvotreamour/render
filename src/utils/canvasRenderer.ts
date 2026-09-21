@@ -35,6 +35,7 @@ interface PeakCap {
 }
 
 export class CanvasRenderer {
+  public isOfflineRender: boolean = false;
   private particles: Particle[] = [];
   private imageCache: Map<string, HTMLImageElement> = new Map();
   private blurredImageCache: Map<string, HTMLCanvasElement> = new Map();
@@ -361,20 +362,23 @@ export class CanvasRenderer {
     const centerX = width / 2;
     const centerY = height / 2;
     const bass = audioData.bassEnergy;
+    const isAudioActive = isPlaying || this.isOfflineRender;
 
     let shakeX = 0;
     let shakeY = 0;
-    if (bg.bassShake > 0 && bass > 0.32 && isPlaying) {
-      const shakeMagnitude = (bass - 0.32) * bg.bassShake * 22;
-      shakeX = (Math.random() - 0.5) * shakeMagnitude;
-      shakeY = (Math.random() - 0.5) * shakeMagnitude;
+    if (bg.bassShake > 0 && bass > 0.12 && isAudioActive) {
+      const shakeMagnitude = Math.pow(Math.max(0, bass - 0.10), 1.2) * bg.bassShake * 24;
+      const s1 = Math.sin(currentTime * 67.3) * 0.6 + Math.sin(currentTime * 113.7) * 0.4;
+      const s2 = Math.cos(currentTime * 79.1) * 0.6 + Math.cos(currentTime * 127.3) * 0.4;
+      shakeX = s1 * shakeMagnitude;
+      shakeY = s2 * shakeMagnitude;
     }
 
-    let zoom = 1 + (isPlaying ? Math.pow(bass, 1.35) * bg.bassZoom * 0.08 : 0);
+    let zoom = 1 + (isAudioActive ? Math.pow(bass, 1.25) * (bg.bassZoom || 0) * 0.10 : 0);
 
     let cinemPanX = 0;
     let cinemPanY = 0;
-    if (effects?.cinematicCamera?.enabled && isPlaying) {
+    if (effects?.cinematicCamera?.enabled && isAudioActive) {
       const cam = effects.cinematicCamera;
       const t = currentTime * 0.1;
       const intensity = cam.intensity || 0.5;
@@ -404,16 +408,16 @@ export class CanvasRenderer {
     ctx.translate(-centerX, -centerY);
 
     // --- 2. Draw Background ---
-    this.drawBackground(ctx, width, height, bg, bass, isPlaying, currentTime, effects);
+    this.drawBackground(ctx, width, height, bg, bass, isAudioActive, currentTime, effects);
 
     // --- 2.5 Draw B-Roll Layer (Cutaways, PiP, Split Screen, Blend Overlay) ---
     if (bg.bRoll && bg.bRoll.enabled !== false && bg.bRoll.clips && bg.bRoll.clips.length > 0) {
-      this.drawBRollLayer(ctx, width, height, bg.bRoll, currentTime, isPlaying, bg);
+      this.drawBRollLayer(ctx, width, height, bg.bRoll, currentTime, isAudioActive, bg);
     }
 
     // --- 3. Draw Background Particles ---
     if (particlesConfig.enabled) {
-      this.updateAndDrawParticles(ctx, width, height, particlesConfig, bass, audioData.isBeat && isPlaying);
+      this.updateAndDrawParticles(ctx, width, height, particlesConfig, bass, audioData.isBeat && isAudioActive);
     }
 
     ctx.restore(); // restore from shake & zoom for visualizer layer (which applies its own scale)
@@ -424,29 +428,29 @@ export class CanvasRenderer {
 
     // --- 3D Perspective & Camera Tilt ---
     if (effects?.camera3D?.enabled) {
-      this.apply3DCameraTransform(ctx, effects.camera3D, currentTime, isPlaying);
+      this.apply3DCameraTransform(ctx, effects.camera3D, currentTime, isAudioActive);
     }
 
     // --- 4. Draw Center Logo / Artwork ---
     // Punchy speaker-cone bounce: expands dynamically on every bass drop
     const bounceFactor = logo.bounceIntensity ?? 1.0;
-    const logoScale = 1 + (isPlaying && logo.enabled ? Math.pow(bass, 1.2) * bounceFactor * 0.22 : 0);
-    this.drawCenterLogo(ctx, logo, logoScale, bass, isPlaying);
+    const logoScale = 1 + (isAudioActive && logo.enabled ? Math.pow(bass, 1.2) * bounceFactor * 0.22 : 0);
+    this.drawCenterLogo(ctx, logo, logoScale, bass, isAudioActive);
 
     // --- 5. Draw Visualizer Spectrum ---
     if (visualizer.enabled !== false) {
-      this.drawVisualizer(ctx, visualizer, audioData, isPlaying, width, height, subtitle);
+      this.drawVisualizer(ctx, visualizer, audioData, isAudioActive, width, height, subtitle);
     }
 
     ctx.restore(); // restore center transformation
 
     // --- 6. TARGETED FRAME VISUAL EFFECTS (Distorsi, Kamera Jadul, Cacing-cacing) ---
     // Dijalankan pada layer video/visual SEBELUM tipografi & subtitle, agar subtitle selalu bersih, tajam & tidak terdistorsi!
-    this.drawTargetedFrameEffects(ctx, width, height, bg, currentTime, bass, isPlaying);
+    this.drawTargetedFrameEffects(ctx, width, height, bg, currentTime, bass, isAudioActive);
 
     // --- 7. POST PROCESSING EFFECTS (RGB Glitch & VHS CRT) ---
     if (effects?.chromaticAberration?.enabled) {
-      this.drawChromaticAberration(ctx, width, height, effects.chromaticAberration, bass, audioData.isBeat && isPlaying);
+      this.drawChromaticAberration(ctx, width, height, effects.chromaticAberration, bass, audioData.isBeat && isAudioActive);
     }
 
     if (effects?.vhsOverlay?.enabled) {
@@ -454,11 +458,11 @@ export class CanvasRenderer {
     }
 
     // --- 8. Draw Typography & Song Info HUD (Untouched by camera effects) ---
-    this.drawTypography(ctx, width, height, typography, currentTime, duration, bass, isPlaying);
+    this.drawTypography(ctx, width, height, typography, currentTime, duration, bass, isAudioActive);
 
     // --- 9. Draw Whisper AI Subtitles / Karaoke Lyrics (Always crystal-clear on top) ---
     if (subtitle && subtitle.enabled) {
-      this.drawSubtitles(ctx, width, height, subtitle, currentTime, bass, isPlaying);
+      this.drawSubtitles(ctx, width, height, subtitle, currentTime, bass, isAudioActive);
     }
 
     // --- 10. Waveform Scrubber HUD ---
@@ -524,7 +528,7 @@ export class CanvasRenderer {
           if (video.duration && Number.isFinite(video.duration) && video.duration > 0) {
             const targetTime = Math.max(0, currentTime) % video.duration;
             const drift = Math.abs(video.currentTime - targetTime);
-            if (drift > 1.2 || (!isPlaying && drift > 0.08)) {
+            if (this.isOfflineRender || drift > 1.2 || (!isPlaying && drift > 0.08)) {
               try {
                 video.currentTime = targetTime;
               } catch {
@@ -532,7 +536,7 @@ export class CanvasRenderer {
               }
             }
           }
-          if (isPlaying) {
+          if (isPlaying && !this.isOfflineRender) {
             if (video.paused) video.play().catch(() => {});
           } else if (!video.paused) {
             video.pause();
@@ -656,14 +660,14 @@ export class CanvasRenderer {
               const drift = Math.abs(video.currentTime - targetTime);
               // Only seek if drift is large (> 1.2s) or if paused and out of sync (> 0.08s)
               // This avoids stutter/freezing from decoder micro-seeks during continuous playback
-              if (drift > 1.2 || (!isPlaying && drift > 0.08)) {
+              if (this.isOfflineRender || drift > 1.2 || (!isPlaying && drift > 0.08)) {
                 try {
                   video.currentTime = targetTime;
                 } catch {}
               }
             }
 
-            if (isPlaying) {
+            if (isPlaying && !this.isOfflineRender) {
               if (video.paused) {
                 video.play().catch(() => {});
               }
@@ -1202,13 +1206,13 @@ export class CanvasRenderer {
           if (vid.duration && Number.isFinite(vid.duration) && vid.duration > 0) {
             const targetTime = timeInClip % vid.duration;
             const drift = Math.abs(vid.currentTime - targetTime);
-            if (drift > 1.2 || (!isPlaying && drift > 0.08)) {
+            if (this.isOfflineRender || drift > 1.2 || (!isPlaying && drift > 0.08)) {
               try {
                 vid.currentTime = targetTime;
               } catch {}
             }
           }
-          if (isPlaying) {
+          if (isPlaying && !this.isOfflineRender) {
             if (vid.paused) vid.play().catch(() => {});
           } else if (!vid.paused) {
             vid.pause();
@@ -1683,7 +1687,9 @@ export class CanvasRenderer {
       defaultYPercent = 50;
     }
 
-    const yPercent = typeof vis.customPosY === 'number' ? vis.customPosY : defaultYPercent;
+    const yPercent = (vis.positionMode === 'below_subtitle' || vis.positionMode === 'above_subtitle')
+      ? defaultYPercent
+      : (typeof vis.customPosY === 'number' ? vis.customPosY : defaultYPercent);
     const xPercent = typeof vis.customPosX === 'number' ? vis.customPosX : 50;
 
     const targetX = (xPercent / 100) * width;
@@ -1697,7 +1703,7 @@ export class CanvasRenderer {
 
     ctx.translate(offsetX, offsetY);
 
-    if (vis.pulseWithBass && isPlaying) {
+    if (vis.pulseWithBass && (isPlaying || this.isOfflineRender)) {
       const pulse = 1 + Math.pow(audioData.bassEnergy, 1.25) * 0.13;
       ctx.scale(pulse, pulse);
     }
@@ -1761,7 +1767,8 @@ export class CanvasRenderer {
     bassBoost: number = 1.0,
     idlePhase: number = 0
   ): number {
-    if (!isPlaying) {
+    const isAudioActive = isPlaying || this.isOfflineRender || (freq && freq.length > 0 && freq.some((v) => v > 5));
+    if (!isAudioActive) {
       return 0.04 + Math.sin(idlePhase) * 0.03;
     }
 
@@ -4553,7 +4560,7 @@ export class CanvasRenderer {
     const video = this.preloadVideo(videoUrl);
     if (!video || (video.readyState < 1 && (video.videoWidth || 0) === 0)) return;
 
-    if (isPlaying) {
+    if (isPlaying && !this.isOfflineRender) {
       if (video.paused) video.play().catch(() => {});
       if (videoConfig.audioReactiveSpeed) {
         video.playbackRate = Math.min(2.0, Math.max(0.5, videoConfig.playbackRate * (1 + bass * 0.35)));
@@ -4584,7 +4591,7 @@ export class CanvasRenderer {
   ): void {
     const tiltXRad = (cam.tiltX * Math.PI) / 180;
     const tiltYRad = (cam.tiltY * Math.PI) / 180;
-    const orbit = cam.autoOrbit && isPlaying ? Math.sin(currentTime * 0.5) * 0.12 : 0;
+    const orbit = cam.autoOrbit && (isPlaying || this.isOfflineRender) ? Math.sin(currentTime * 0.5) * 0.12 : 0;
 
     // Pseudo-3D Perspective Projection
     ctx.scale(1, Math.max(0.2, Math.cos(tiltXRad)));

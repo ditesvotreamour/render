@@ -21,6 +21,7 @@ declare global {
 const canvas = document.getElementById('render-canvas') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
 const renderer = new CanvasRenderer();
+renderer.isOfflineRender = true;
 const analyzer = new OfflineAudioAnalyzer(2048);
 
 let visualizerConfig: VisualizerConfig;
@@ -206,6 +207,7 @@ window.__INIT_RENDER__ = async (config: any, audioBase64: string) => {
     ctx.font = `${testWeight} 46px "${activeFont}", "Anton", sans-serif`;
     ctx.measureText('THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG');
 
+    renderer.isOfflineRender = true;
     window.__RENDER_READY__ = true;
     return true;
   } catch (err) {
@@ -272,7 +274,7 @@ window.__RENDER_FRAME__ = async (frameIndex: number, fps: number, startTime: num
     audioData,
     currentTime,
     durationSeconds,
-    false, // isPlaying=false during offline frame capture so videos don't drift in wall-clock time
+    true, // isPlaying=true during offline frame capture so visualizer, camera bass reactive, and effects dance to audio
     subtitleConfig,
     effectsConfig
   );
