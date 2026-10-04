@@ -270,7 +270,22 @@ export default defineConfig({
   plugins: [react(), githubDownloadProxyPlugin(), koboillmProxyPlugin()],
   server: {
     watch: {
-      ignored: ['**/temp_gapps/**', '**/dist/**', '**/dist-render/**', '**/.git/**', '**/google-photos-manager/**'],
+      ignored: [
+        '**/*.zip',
+        '**/*.apk',
+        '**/*.tar',
+        '**/*.tar.gz',
+        '**/*.gz',
+        '**/*.7z',
+        '**/*.rar',
+        '**/*.iso',
+        '**/temp_*/**',
+        '**/temp_gapps/**',
+        '**/google-photos-manager/**',
+        '**/dist/**',
+        '**/dist-render/**',
+        '**/.git/**',
+      ],
     },
     proxy: {
       '/api-koboillm': {
