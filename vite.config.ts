@@ -269,6 +269,9 @@ function koboillmProxyPlugin(): Plugin {
 export default defineConfig({
   plugins: [react(), githubDownloadProxyPlugin(), koboillmProxyPlugin()],
   server: {
+    watch: {
+      ignored: ['**/temp_gapps/**', '**/dist/**', '**/dist-render/**', '**/.git/**', '**/google-photos-manager/**'],
+    },
     proxy: {
       '/api-koboillm': {
         target: 'https://api.koboillm.com',
