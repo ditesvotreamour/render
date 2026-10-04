@@ -1779,16 +1779,21 @@ export class CanvasRenderer {
       Math.floor(Math.pow(normalizedIndex, 1.35) * (freqLen * 0.72))
     );
 
-    const rawByte = freq[binIndex] || 0;
-    // 1. Subtract ambient noise floor (~28/255) so quiet moments and valleys drop to bottom
-    const cleanVal = Math.max(0, (rawByte - 28) / 227);
+    // Sample adjacent bins to avoid single-bin FFT nulls and fill spectrum body
+    const b0 = Math.max(0, binIndex - 1);
+    const b1 = binIndex;
+    const b2 = Math.min(freqLen - 1, binIndex + 1);
+    const rawByte = (freq[b0] * 0.25 + freq[b1] * 0.5 + freq[b2] * 0.25);
+
+    // 1. Subtract ambient noise floor (~18/255) so quiet moments drop cleanly while melodic elements remain active
+    const cleanVal = Math.max(0, (rawByte - 18) / 237);
 
     // 2. Dynamic power expansion: creates dramatic contrast between musical beats and valleys
-    const expanded = Math.pow(cleanVal, 1.45);
+    const expanded = Math.pow(cleanVal, 1.32);
 
     // 3. Fletcher-Munson / pink noise frequency tilt:
     // Audio energy naturally drops at high frequencies. Boost high bins proportionally so treble dances!
-    const trebleTilt = 1.0 + Math.pow(normalizedIndex, 0.6) * 1.4;
+    const trebleTilt = 1.0 + Math.pow(normalizedIndex, 0.6) * 1.5;
 
     // 4. Bass boost on lowest 16% frequency bins (kick, 808, sub-bass)
     const isBassBin = binIndex < freqLen * 0.16;
